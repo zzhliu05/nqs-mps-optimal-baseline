@@ -1,0 +1,7 @@
+{
+  "system": {"nphi": 36, "p": 1, "q": 3, "tk": 5, "landau_level": 0, "ratio_rect": 1.0},
+  "network": {"generation": "backflow", "hidden_sizes": [397, 397], "bond_dim": 10, "embed_dim": 128, "init_std": 0.01},
+  "sampling": {"proposal": "sector_uniform", "chains": 4096, "estimator_chains": null, "burn": 40, "between": 1},
+  "training": {"steps": 2000, "seed": 362039, "optimizer": "kfac", "learning_rate": 0.005, "damping": 0.001, "max_step_norm": 10.0},
+  "execution": {"backend": "m4", "chain_batch": 4096, "forward_batch": 32768, "row_width": 608, "cpu_threads": 18, "max_basis_states": 50000000}
+}

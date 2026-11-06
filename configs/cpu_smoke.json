@@ -1,0 +1,8 @@
+{
+  "system": {"nphi": 6, "tk": 0, "coulomb_cut": 12},
+  "network": {"hidden_sizes": [8, 8], "bond_dim": 2, "embed_dim": 4},
+  "sampling": {"proposal": "conserved_pair", "chains": 8, "burn": 2, "between": 1},
+  "training": {"steps": 2, "seed": 1234, "optimizer": "kfac"},
+  "execution": {"backend": "reference", "chain_batch": 8, "forward_batch": 16, "row_width": 8, "cpu_threads": 2, "max_basis_states": 1000}
+}
+
