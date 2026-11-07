@@ -244,6 +244,7 @@ def _vmc_chain_batched_loss_and_grad(
     wf_l2_sq = 0.0
     wf_abs_sum = 0.0
     wf_logabs_sum = 0.0
+    wf_logabs_sq_sum = 0.0
     wf_abs_max = 0.0
     wf_abs_min = np.inf
     wf_count = 0
@@ -458,7 +459,12 @@ def _vmc_chain_batched_loss_and_grad(
         chunk_count = chain_batch_size * config.network.k
         wf_l2_sq += float(wf_stats["wf_l2_norm"]) ** 2
         wf_abs_sum += float(wf_stats["wf_abs_mean"]) * chunk_count
-        wf_logabs_sum += float(wf_stats["wf_logabs_mean"]) * chunk_count
+        chunk_logabs_mean = float(wf_stats["wf_logabs_mean"])
+        chunk_logabs_std = float(wf_stats["wf_logabs_std"])
+        wf_logabs_sum += chunk_logabs_mean * chunk_count
+        wf_logabs_sq_sum += (
+            chunk_logabs_std**2 + chunk_logabs_mean**2
+        ) * chunk_count
         wf_abs_max = max(wf_abs_max, float(wf_stats["wf_abs_max"]))
         wf_abs_min = min(wf_abs_min, float(wf_stats["wf_abs_min"]))
         wf_count += chunk_count
@@ -467,6 +473,10 @@ def _vmc_chain_batched_loss_and_grad(
     energy = float(np.real(np.mean(eloc_np)))
     variance = float(np.real(np.mean(np.abs(eloc_np - energy) ** 2)))
     eloc_mean_imag = float(np.imag(np.mean(eloc_np)))
+    eloc_real = np.real(eloc_np)
+    eloc_abs_centered = np.abs(eloc_np - energy)
+    eloc_real_quantiles = np.quantile(eloc_real, [0.01, 0.5, 0.99])
+    eloc_abs_quantiles = np.quantile(eloc_abs_centered, [0.5, 0.95, 0.99])
 
     def chunk_loss_fn(
         current_params, current_states, current_positions, current_eloc
@@ -541,6 +551,23 @@ def _vmc_chain_batched_loss_and_grad(
         "wf_abs_min": jnp.asarray(wf_abs_min, dtype=jnp.float64),
         "wf_logabs_mean": jnp.asarray(
             wf_logabs_sum / wf_count, dtype=jnp.float64
+        ),
+        "wf_logabs_std": jnp.asarray(
+            np.sqrt(max(
+                0.0,
+                wf_logabs_sq_sum / wf_count
+                - (wf_logabs_sum / wf_count) ** 2,
+            )),
+            dtype=jnp.float64,
+        ),
+        "eloc_real_q01": jnp.asarray(eloc_real_quantiles[0], dtype=jnp.float64),
+        "eloc_real_q50": jnp.asarray(eloc_real_quantiles[1], dtype=jnp.float64),
+        "eloc_real_q99": jnp.asarray(eloc_real_quantiles[2], dtype=jnp.float64),
+        "eloc_abs_centered_q50": jnp.asarray(eloc_abs_quantiles[0], dtype=jnp.float64),
+        "eloc_abs_centered_q95": jnp.asarray(eloc_abs_quantiles[1], dtype=jnp.float64),
+        "eloc_abs_centered_q99": jnp.asarray(eloc_abs_quantiles[2], dtype=jnp.float64),
+        "eloc_abs_centered_max": jnp.asarray(
+            np.max(eloc_abs_centered), dtype=jnp.float64
         ),
     }
     timer = time.perf_counter()
@@ -1344,6 +1371,11 @@ def train_vmc(
                 "wf_abs_max": float(aux["wf_abs_max"]),
                 "wf_abs_min": float(aux["wf_abs_min"]),
                 "wf_logabs_mean": float(aux["wf_logabs_mean"]),
+                **(
+                    {}
+                    if "wf_logabs_std" not in aux
+                    else {"wf_logabs_std": float(aux["wf_logabs_std"])}
+                ),
                 "accept": float(accept),
                 "sampler_pool_chains": int(config.sampler.n_chains),
                 "estimator_chains": int(estimator_chains),
@@ -1370,6 +1402,15 @@ def train_vmc(
                     else {}
                 ),
                 **embedding_stats,
+                **{
+                    key: float(aux[key])
+                    for key in (
+                        "eloc_real_q01", "eloc_real_q50", "eloc_real_q99",
+                        "eloc_abs_centered_q50", "eloc_abs_centered_q95",
+                        "eloc_abs_centered_q99", "eloc_abs_centered_max",
+                    )
+                    if key in aux
+                },
                 **opt_stats,
                 **(
                     {}

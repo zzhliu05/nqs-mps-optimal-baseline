@@ -373,6 +373,9 @@ class OptimizerConfig:
     sr_diag_shift: float = 1e-3
     sr_samples: int | None = None
     sr_jacobian_batch_size: int = 32
+    kfac_diagnostics: bool = False
+    kfac_diagnostic_samples: int = 512
+    kfac_trace_probes: int = 4
     cg_tol: float = 1e-8
     cg_maxiter: int = 2000
     max_sr_step_norm: float = 10.0
@@ -401,6 +404,10 @@ class OptimizerConfig:
             raise ValueError("sr_samples must be positive when provided.")
         if self.sr_jacobian_batch_size <= 0:
             raise ValueError("sr_jacobian_batch_size must be positive.")
+        if self.kfac_diagnostic_samples <= 0:
+            raise ValueError("kfac_diagnostic_samples must be positive.")
+        if self.kfac_trace_probes < 0:
+            raise ValueError("kfac_trace_probes must be non-negative.")
         enabled_schedules = sum(
             (
                 bool(self.constant_lr),

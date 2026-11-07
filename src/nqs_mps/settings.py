@@ -46,6 +46,9 @@ class Training:
     max_step_norm: float = 10.0
     sr_samples: int | None = None
     sr_jacobian_batch_size: int = 32
+    kfac_diagnostics: bool = False
+    kfac_diagnostic_samples: int = 512
+    kfac_trace_probes: int = 4
 
 
 @dataclass
@@ -94,7 +97,8 @@ def validate(settings):
     integer_keys = {"system": ("nphi", "p", "q", "tk", "landau_level"),
                     "network": ("bond_dim", "embed_dim", "conv_kernel_size"),
                     "sampling": ("chains", "burn", "between"),
-                    "training": ("steps", "seed", "sr_jacobian_batch_size"),
+                    "training": ("steps", "seed", "sr_jacobian_batch_size",
+                                 "kfac_diagnostic_samples", "kfac_trace_probes"),
                     "execution": tuple(k for k in e if k not in {
                         "backend", "neighbor_execution", "first_layer_execution",
                         "row_workspace", "sampler_scan",
@@ -129,6 +133,8 @@ def validate(settings):
         type(t["sr_samples"]) is not int or t["sr_samples"] <= 0
     ):
         raise ValueError("training.sr_samples must be null or a positive integer")
+    if type(t["kfac_diagnostics"]) is not bool:
+        raise ValueError("training.kfac_diagnostics must be boolean")
     if n["generation"] == "direct" and t["optimizer"] == "kfac":
         raise ValueError("Direct MPS has no MLP KFAC factors; select adam")
     if p["chains"] <= 0 or p["burn"] < 0 or p["between"] < 0:
@@ -209,6 +215,9 @@ def core_config(settings, output):
         optimizer=OptimizerConfig(name=optimizer_name,
             lr=t["learning_rate"], constant_lr=True, sr_diag_shift=t["damping"],
             sr_samples=t["sr_samples"], sr_jacobian_batch_size=t["sr_jacobian_batch_size"],
+            kfac_diagnostics=t["kfac_diagnostics"],
+            kfac_diagnostic_samples=t["kfac_diagnostic_samples"],
+            kfac_trace_probes=t["kfac_trace_probes"],
             max_sr_step_norm=t["max_step_norm"]),
         training=TrainingConfig(optimize_method="vmc", n_steps=t["steps"], min_steps=t["steps"],
             seed=t["seed"], vmc_row_batch_size=e["chain_batch"], vmc_chain_batch_size=e["chain_batch"],

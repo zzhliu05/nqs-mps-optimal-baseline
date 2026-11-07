@@ -1337,10 +1337,11 @@ def kfac_natural_gradient_update(
     factor_damping = np.sqrt(damping)
     gpu_solve = _os.environ.get("NQS_KFAC_GPU_SOLVE") == "1"
     pref_delta = []
+    diagnostic_stats = {}
     kfac_cond_max = np.nan
-    for layer, layer_grad, a_factor, g_factor in zip(
+    for layer_index, (layer, layer_grad, a_factor, g_factor) in enumerate(zip(
         layer_params, layer_grads, a_factors, g_factors
-    ):
+    )):
         g_is_diagonal = int(g_factor.ndim) == 1
         if opt_cfg.report_fisher_condition:
             a_np = np.asarray(a_factor, dtype=np.float64)
@@ -1401,6 +1402,41 @@ def kfac_natural_gradient_update(
                 layer_grad["ln_bias"], dtype=jnp.float32
             )
         pref_delta.append(layer_delta)
+        if opt_cfg.kfac_diagnostics:
+            a_eigs = np.linalg.eigvalsh(
+                np.asarray(a_factor, dtype=np.float64)
+            )
+            g_values = np.asarray(g_factor, dtype=np.float64)
+            g_eigs = (
+                g_values
+                if g_is_diagonal
+                else np.linalg.eigvalsh(g_values)
+            )
+            grad_layer_flat, _ = ravel_pytree(layer_grad)
+            delta_layer_flat, _ = ravel_pytree(layer_delta)
+            prefix = f"kfac_layer_{layer_index}"
+            diagnostic_stats.update(
+                {
+                    f"{prefix}_a_min": float(a_eigs[0]),
+                    f"{prefix}_a_max": float(a_eigs[-1]),
+                    f"{prefix}_a_cond_damped": float(
+                        (a_eigs[-1] + factor_damping)
+                        / max(a_eigs[0] + factor_damping, 1e-30)
+                    ),
+                    f"{prefix}_g_min": float(np.min(g_eigs)),
+                    f"{prefix}_g_max": float(np.max(g_eigs)),
+                    f"{prefix}_g_cond_damped": float(
+                        (np.max(g_eigs) + factor_damping)
+                        / max(np.min(g_eigs) + factor_damping, 1e-30)
+                    ),
+                    f"{prefix}_grad_norm": float(
+                        jnp.linalg.norm(grad_layer_flat.astype(jnp.float64))
+                    ),
+                    f"{prefix}_raw_delta_norm": float(
+                        jnp.linalg.norm(delta_layer_flat.astype(jnp.float64))
+                    ),
+                }
+            )
     jastrow_delta = None
     if jastrow_factors is not None:
         jastrow_delta, jastrow_condition = _solve_kfac_blocks(
@@ -1468,7 +1504,9 @@ def kfac_natural_gradient_update(
     grad_flat, _ = ravel_pytree(grad_tree)
     grad_norm = float(jnp.linalg.norm(grad_flat.astype(jnp.float64)))
     delta_flat, _ = ravel_pytree(delta_tree)
-    delta_norm = float(jnp.linalg.norm(delta_flat))
+    raw_delta_flat = delta_flat
+    raw_delta_norm = float(jnp.linalg.norm(raw_delta_flat.astype(jnp.float64)))
+    delta_norm = raw_delta_norm
     trust_scale = 1.0
     if (
         opt_cfg.max_sr_step_norm > 0
@@ -1480,6 +1518,104 @@ def kfac_natural_gradient_update(
         )
         delta_flat, _ = ravel_pytree(delta_tree)
     lr = learning_rate_at_step(opt_cfg, step, total_steps)
+
+    if opt_cfg.kfac_diagnostics:
+        diagnostic_count = min(
+            int(metric_states.shape[0]), int(opt_cfg.kfac_diagnostic_samples)
+        )
+        diagnostic_states = metric_states[:diagnostic_count]
+        theta_flat, unravel_params = ravel_pytree(params)
+
+        def score_fn(flat_params):
+            flat_states = diagnostic_states.reshape(
+                (-1, diagnostic_states.shape[-1])
+            )
+            phi_flat = batched_wavefunction_matrix(
+                unravel_params(flat_params), flat_states, net_cfg
+            )
+            psi_matrices = phi_flat.reshape(
+                (diagnostic_count, net_cfg.k, net_cfg.k)
+            )
+            sign, logabsdet = jnp.linalg.slogdet(psi_matrices)
+            return logabsdet + 1j * jnp.angle(sign)
+
+        raw_tangent = raw_delta_flat.astype(theta_flat.dtype)
+        applied_scale = lr * trust_scale
+        finite_difference_scale = max(applied_scale, 1e-8)
+        scores = score_fn(theta_flat)
+        scores_plus = score_fn(
+            theta_flat + finite_difference_scale * raw_tangent
+        )
+        scores_minus = score_fn(
+            theta_flat - finite_difference_scale * raw_tangent
+        )
+        scores, scores_plus, scores_minus = block_until_ready_tree(
+            (scores, scores_plus, scores_minus)
+        )
+        directional_scores = (
+            scores_plus - scores_minus
+        ) / (2.0 * finite_difference_scale)
+        centered_direction = directional_scores - jnp.mean(directional_scores)
+        raw_fisher_quad = jnp.mean(jnp.abs(centered_direction) ** 2)
+        raw_sampling_kl = 2.0 * jnp.mean(
+            jnp.real(centered_direction) ** 2
+        )
+        actual_score_change = scores_plus - scores
+        centered_actual_change = (
+            actual_score_change - jnp.mean(actual_score_change)
+        )
+        diagnostic_stats.update(
+            {
+                "kfac_diagnostic_samples": diagnostic_count,
+                "score_real_std": float(jnp.std(jnp.real(scores))),
+                "score_imag_std": float(jnp.std(jnp.imag(scores))),
+                "raw_direction_gauge_real": float(
+                    jnp.real(jnp.mean(directional_scores))
+                ),
+                "raw_direction_gauge_imag": float(
+                    jnp.imag(jnp.mean(directional_scores))
+                ),
+                "raw_fisher_quadratic": float(raw_fisher_quad),
+                "raw_sampling_kl_quadratic": float(raw_sampling_kl),
+                "applied_fisher_quadratic": float(
+                    raw_fisher_quad * applied_scale**2
+                ),
+                "predicted_sampling_kl": float(
+                    raw_sampling_kl * applied_scale**2
+                ),
+                "actual_score_change_l2": float(
+                    jnp.mean(jnp.abs(centered_actual_change) ** 2)
+                ),
+                "actual_sampling_kl_quadratic": float(
+                    2.0 * jnp.mean(jnp.real(centered_actual_change) ** 2)
+                ),
+                "diagnostic_finite_difference_scale": float(
+                    finite_difference_scale
+                ),
+            }
+        )
+        if opt_cfg.kfac_trace_probes:
+            probe_values = []
+            probe_scale = 0.05 / np.sqrt(max(1, int(theta_flat.size)))
+            for probe_index in range(int(opt_cfg.kfac_trace_probes)):
+                probe = jax.random.rademacher(
+                    jax.random.PRNGKey(918273 + probe_index),
+                    theta_flat.shape,
+                    dtype=theta_flat.dtype,
+                )
+                probe_plus = score_fn(theta_flat + probe_scale * probe)
+                probe_minus = score_fn(theta_flat - probe_scale * probe)
+                probe_scores = (
+                    probe_plus - probe_minus
+                ) / (2.0 * probe_scale)
+                probe_scores = probe_scores - jnp.mean(probe_scores)
+                probe_values.append(jnp.mean(jnp.abs(probe_scores) ** 2))
+            diagnostic_stats["fisher_trace_hutchinson"] = float(
+                jnp.mean(jnp.stack(probe_values))
+            )
+            diagnostic_stats["fisher_trace_probes"] = int(
+                opt_cfg.kfac_trace_probes
+            )
 
     update_start = time.perf_counter()
 
@@ -1497,6 +1633,9 @@ def kfac_natural_gradient_update(
         "kfac_variant": kfac_variant,
         "lr": lr,
         "grad_norm": grad_norm,
+        "grad_rms": grad_norm / np.sqrt(max(1, int(grad_flat.size))),
+        "raw_delta_norm": raw_delta_norm,
+        "raw_delta_rms": raw_delta_norm / np.sqrt(max(1, int(raw_delta_flat.size))),
         "delta_norm": float(jnp.linalg.norm(delta_flat)),
         "applied_update_norm": float(jnp.linalg.norm(lr * delta_flat)),
         "trust_region_scale": float(trust_scale),
@@ -1505,6 +1644,7 @@ def kfac_natural_gradient_update(
         "time_solve": time_solve,
         "time_update": time_update,
         "time_sr_total": time.perf_counter() - total_start,
+        **diagnostic_stats,
     }
 
 
@@ -2379,6 +2519,8 @@ def _wavefunction_magnitude_stats(full_phi):
         "wf_abs_max": jnp.max(abs_phi),
         "wf_abs_min": jnp.min(abs_phi),
         "wf_logabs_mean": jnp.mean(log_abs_phi, dtype=jnp.float64),
+        "wf_logabs_std": jnp.std(log_abs_phi, dtype=jnp.float64),
+        "wf_logabs_range": jnp.max(log_abs_phi) - jnp.min(log_abs_phi),
     }
 
 

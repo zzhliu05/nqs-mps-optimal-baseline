@@ -34,3 +34,17 @@ def test_public_sr_config_maps_to_core_optimizer(tmp_path):
     assert config.optimizer.sr_diag_shift == 0.001
     assert config.optimizer.sr_samples == 512
     assert config.optimizer.sr_jacobian_batch_size == 32
+
+
+def test_public_kfac_diagnostic_config_maps_to_core_optimizer(tmp_path):
+    source = (
+        Path(__file__).parents[1]
+        / "configs"
+        / "nphi51_tk0_kfac_diagnostic.json"
+    )
+    settings = load_settings(source)
+    config = core_config(settings, tmp_path / "output")
+    assert config.optimizer.name == "natural_gradient"
+    assert config.optimizer.kfac_diagnostics is True
+    assert config.optimizer.kfac_diagnostic_samples == 512
+    assert config.optimizer.kfac_trace_probes == 4
