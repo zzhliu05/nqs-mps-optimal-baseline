@@ -3630,29 +3630,37 @@ def make_optax_optimizer(opt_cfg: OptimizerConfig, total_steps: int):
     lr_schedule = make_learning_rate_schedule(opt_cfg, total_steps)
 
     if opt_cfg.name == "adam":
-        return optax.adam(
+        optimizer = optax.adam(
             learning_rate=lr_schedule,
             b1=opt_cfg.adam_b1,
             b2=opt_cfg.adam_b2,
             eps=opt_cfg.adam_eps,
         )
-    if opt_cfg.name == "adamw":
-        return optax.adamw(
+    elif opt_cfg.name == "adamw":
+        optimizer = optax.adamw(
             learning_rate=lr_schedule,
             b1=opt_cfg.adam_b1,
             b2=opt_cfg.adam_b2,
             eps=opt_cfg.adam_eps,
             weight_decay=opt_cfg.adam_weight_decay,
         )
-    if opt_cfg.name == "muon":
-        return optax.contrib.muon(
+    elif opt_cfg.name == "muon":
+        optimizer = optax.contrib.muon(
             learning_rate=lr_schedule,
             beta=opt_cfg.muon_beta,
             ns_steps=opt_cfg.muon_ns_steps,
             weight_decay=opt_cfg.muon_weight_decay,
             adaptive=opt_cfg.muon_adaptive,
         )
-    raise ValueError(f"Unsupported Optax optimizer: {opt_cfg.name}")
+    else:
+        raise ValueError(f"Unsupported Optax optimizer: {opt_cfg.name}")
+
+    if opt_cfg.gradient_clip_norm is not None:
+        optimizer = optax.chain(
+            optax.clip_by_global_norm(opt_cfg.gradient_clip_norm),
+            optimizer,
+        )
+    return optimizer
 
 
 def perturb_params(params, scale: float):
@@ -3693,6 +3701,13 @@ def optax_update(
     new_params, updates = block_until_ready_tree((new_params, updates))
     grad_flat, _ = ravel_pytree(grad_tree)
     update_flat, _ = ravel_pytree(updates)
+    grad_norm = float(jnp.linalg.norm(grad_flat.astype(jnp.float64)))
+    clip_norm = opt_cfg.gradient_clip_norm
+    clip_scale = (
+        min(1.0, float(clip_norm) / max(grad_norm, 1e-300))
+        if clip_norm is not None
+        else 1.0
+    )
     return (
         new_params,
         OptimizerState(optimizer_state.optimizer, new_state),
@@ -3700,9 +3715,10 @@ def optax_update(
             "lr": learning_rate_from_count(
                 opt_cfg, int(step) - 1, total_steps
             ),
-            "grad_norm": float(
-                jnp.linalg.norm(grad_flat.astype(jnp.float64))
-            ),
+            "grad_norm": grad_norm,
+            "grad_rms": grad_norm / float(jnp.sqrt(float(grad_flat.size))),
+            "gradient_clip_scale": clip_scale,
+            "clipped_grad_norm": grad_norm * clip_scale,
             "applied_update_norm": float(
                 jnp.linalg.norm(update_flat.astype(jnp.float64))
             ),
