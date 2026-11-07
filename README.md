@@ -36,6 +36,13 @@ complex log-wavefunction derivatives, and solves the equivalent real
 `training.learning_rate`, and `training.max_step_norm` retain their existing
 meanings. The production default remains `"kfac"`.
 
+`training.sr_samples` selects how many estimator chains build the SR metric;
+the energy and gradient still use all `sampling.estimator_chains`.
+`training.sr_jacobian_batch_size` bounds the reverse-mode output batch so JAX
+does not materialize an impractically large vectorized pullback. The Nphi=51
+example uses 512 SR samples in blocks of 32 while retaining 4096 estimator
+chains.
+
 The canonical opt-in example is
 `configs/nphi51_tk0_params_0p2m_sr_2000.json`. Its Jacobian storage scales as
 `O(2 * estimator_chains * parameters)` and its dense sample solve as

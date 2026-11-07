@@ -32,3 +32,5 @@ def test_public_sr_config_maps_to_core_optimizer(tmp_path):
     config = core_config(settings, tmp_path / "output")
     assert config.optimizer.name == "sr"
     assert config.optimizer.sr_diag_shift == 0.001
+    assert config.optimizer.sr_samples == 512
+    assert config.optimizer.sr_jacobian_batch_size == 32

@@ -44,6 +44,8 @@ class Training:
     learning_rate: float = 0.005
     damping: float = 0.001
     max_step_norm: float = 10.0
+    sr_samples: int | None = None
+    sr_jacobian_batch_size: int = 32
 
 
 @dataclass
@@ -92,7 +94,7 @@ def validate(settings):
     integer_keys = {"system": ("nphi", "p", "q", "tk", "landau_level"),
                     "network": ("bond_dim", "embed_dim", "conv_kernel_size"),
                     "sampling": ("chains", "burn", "between"),
-                    "training": ("steps", "seed"),
+                    "training": ("steps", "seed", "sr_jacobian_batch_size"),
                     "execution": tuple(k for k in e if k not in {
                         "backend", "neighbor_execution", "first_layer_execution",
                         "row_workspace", "sampler_scan",
@@ -123,6 +125,10 @@ def validate(settings):
         raise ValueError("Invalid bond/embed size or convolution kernel (must be odd)")
     if t["optimizer"] not in {"kfac", "sr", "adam"} or t["steps"] < 1:
         raise ValueError("Require optimizer kfac/sr/adam and positive steps")
+    if t["sr_samples"] is not None and (
+        type(t["sr_samples"]) is not int or t["sr_samples"] <= 0
+    ):
+        raise ValueError("training.sr_samples must be null or a positive integer")
     if n["generation"] == "direct" and t["optimizer"] == "kfac":
         raise ValueError("Direct MPS has no MLP KFAC factors; select adam")
     if p["chains"] <= 0 or p["burn"] < 0 or p["between"] < 0:
@@ -201,7 +207,9 @@ def core_config(settings, output):
         sampler=SamplerConfig(proposal_mode=p["proposal"], n_chains=p["chains"],
             n_burn=p["burn"], n_between=p["between"], n_samples=1, prob_n_samples=0),
         optimizer=OptimizerConfig(name=optimizer_name,
-            lr=t["learning_rate"], constant_lr=True, sr_diag_shift=t["damping"], max_sr_step_norm=t["max_step_norm"]),
+            lr=t["learning_rate"], constant_lr=True, sr_diag_shift=t["damping"],
+            sr_samples=t["sr_samples"], sr_jacobian_batch_size=t["sr_jacobian_batch_size"],
+            max_sr_step_norm=t["max_step_norm"]),
         training=TrainingConfig(optimize_method="vmc", n_steps=t["steps"], min_steps=t["steps"],
             seed=t["seed"], vmc_row_batch_size=e["chain_batch"], vmc_chain_batch_size=e["chain_batch"],
             vmc_estimator_chains=p["estimator_chains"], vmc_sparse_rows_from_bitstrings=True,

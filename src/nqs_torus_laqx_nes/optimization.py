@@ -3248,12 +3248,16 @@ def minsr_update(
             states, metric_positions, net_cfg
         )
 
-    sample_count = int(metric_states.shape[0])
+    available_samples = int(metric_states.shape[0])
+    sample_count = available_samples
+    if opt_cfg.sr_samples is not None:
+        sample_count = min(available_samples, int(opt_cfg.sr_samples))
+        metric_states = metric_states[:sample_count]
     if sample_count < 1:
         raise ValueError("SR requires at least one metric sample.")
-    batch_size = sample_count
+    batch_size = min(sample_count, int(opt_cfg.sr_jacobian_batch_size))
     if metric_batch_size is not None:
-        batch_size = max(1, min(sample_count, int(metric_batch_size)))
+        batch_size = min(batch_size, int(metric_batch_size))
 
     dmat_start = time.perf_counter()
     jacobian_chunks = []
@@ -3318,6 +3322,8 @@ def minsr_update(
         "applied_update_norm": float(jnp.linalg.norm(applied_delta)),
         "trust_region_scale": float(trust_scale),
         "sr_samples": sample_count,
+        "sr_available_samples": available_samples,
+        "sr_jacobian_batch_size": batch_size,
         "sr_kernel_dim": 2 * sample_count,
         "time_dmat": time_dmat,
         "time_design": time_design,
@@ -3741,7 +3747,9 @@ def optimizer_log_suffix(
             f"opt=sr solver=minsr grad={stats['grad_norm']:.3e} "
             f"|delta|={stats['delta_norm']:.3e} "
             f"|dtheta|={stats['applied_update_norm']:.3e}{lr_text} "
-            f"samples={stats['sr_samples']} kernel={stats['sr_kernel_dim']} "
+            f"samples={stats['sr_samples']}/{stats['sr_available_samples']} "
+            f"jac_batch={stats['sr_jacobian_batch_size']} "
+            f"kernel={stats['sr_kernel_dim']} "
             f"tr={stats['trust_region_scale']:.3e} "
             f"time(opt={time_update_total:.3f}s, "
             f"dmat={stats['time_dmat']:.3f}s, "

@@ -371,6 +371,8 @@ class OptimizerConfig:
     cyclic_lr_mode: str = "triangular"
     report_fisher_condition: bool = False
     sr_diag_shift: float = 1e-3
+    sr_samples: int | None = None
+    sr_jacobian_batch_size: int = 32
     cg_tol: float = 1e-8
     cg_maxiter: int = 2000
     max_sr_step_norm: float = 10.0
@@ -395,6 +397,10 @@ class OptimizerConfig:
             raise ValueError(f"Unsupported optimizer: {self.name}")
         if self.lr <= 0:
             raise ValueError("lr must be positive.")
+        if self.sr_samples is not None and self.sr_samples <= 0:
+            raise ValueError("sr_samples must be positive when provided.")
+        if self.sr_jacobian_batch_size <= 0:
+            raise ValueError("sr_jacobian_batch_size must be positive.")
         enabled_schedules = sum(
             (
                 bool(self.constant_lr),
