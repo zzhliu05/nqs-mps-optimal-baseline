@@ -3606,12 +3606,17 @@ def signed_gradient_update(
     grad_flat, _ = ravel_pytree(grad_tree)
     grad_sign = jnp.sign(grad_flat)
     lr = learning_rate_at_step(opt_cfg, step, total_steps)
-    new_theta = theta - lr * grad_sign
+    applied_delta = -lr * grad_sign
+    new_theta = theta + applied_delta
     new_theta.block_until_ready()
     return unravel(new_theta), {
         "lr": lr,
         "grad_norm": float(jnp.linalg.norm(grad_flat)),
+        "grad_rms": float(
+            jnp.linalg.norm(grad_flat) / jnp.sqrt(float(grad_flat.size))
+        ),
         "grad_sign_norm": float(jnp.linalg.norm(grad_sign)),
+        "applied_update_norm": float(jnp.linalg.norm(applied_delta)),
         "time_update": time.perf_counter() - start,
     }
 

@@ -42,6 +42,8 @@ class Training:
     seed: int = 362039
     optimizer: str = "kfac"
     learning_rate: float = 0.005
+    learning_rate_schedule: str = "constant"
+    decay_rate: int = 1000
     damping: float = 0.001
     max_step_norm: float = 10.0
     sr_samples: int | None = None
@@ -98,6 +100,7 @@ def validate(settings):
                     "network": ("bond_dim", "embed_dim", "conv_kernel_size"),
                     "sampling": ("chains", "burn", "between"),
                     "training": ("steps", "seed", "sr_jacobian_batch_size",
+                                 "decay_rate",
                                  "kfac_diagnostic_samples", "kfac_trace_probes"),
                     "execution": tuple(k for k in e if k not in {
                         "backend", "neighbor_execution", "first_layer_execution",
@@ -127,8 +130,14 @@ def validate(settings):
         raise ValueError("hidden_sizes must be a nonempty list of positive integers")
     if n["bond_dim"] <= 0 or n["embed_dim"] <= 0 or n["conv_kernel_size"] <= 0 or n["conv_kernel_size"] % 2 != 1:
         raise ValueError("Invalid bond/embed size or convolution kernel (must be odd)")
-    if t["optimizer"] not in {"kfac", "sr", "adam"} or t["steps"] < 1:
-        raise ValueError("Require optimizer kfac/sr/adam and positive steps")
+    if t["optimizer"] not in {"kfac", "sr", "adam", "sign"} or t["steps"] < 1:
+        raise ValueError("Require optimizer kfac/sr/adam/sign and positive steps")
+    if t["learning_rate_schedule"] not in {"constant", "inverse_time"}:
+        raise ValueError(
+            "training.learning_rate_schedule must be constant or inverse_time"
+        )
+    if t["decay_rate"] <= 0:
+        raise ValueError("training.decay_rate must be positive")
     if t["sr_samples"] is not None and (
         type(t["sr_samples"]) is not int or t["sr_samples"] <= 0
     ):
@@ -202,6 +211,7 @@ def core_config(settings, output):
         "kfac": "natural_gradient",
         "sr": "sr",
         "adam": "adam",
+        "sign": "signed_gradient",
     }[t["optimizer"]]
     result = RunConfig(
         system=SystemConfig(**s),
@@ -213,7 +223,9 @@ def core_config(settings, output):
         sampler=SamplerConfig(proposal_mode=p["proposal"], n_chains=p["chains"],
             n_burn=p["burn"], n_between=p["between"], n_samples=1, prob_n_samples=0),
         optimizer=OptimizerConfig(name=optimizer_name,
-            lr=t["learning_rate"], constant_lr=True, sr_diag_shift=t["damping"],
+            lr=t["learning_rate"],
+            constant_lr=t["learning_rate_schedule"] == "constant",
+            decay_rate=t["decay_rate"], sr_diag_shift=t["damping"],
             sr_samples=t["sr_samples"], sr_jacobian_batch_size=t["sr_jacobian_batch_size"],
             kfac_diagnostics=t["kfac_diagnostics"],
             kfac_diagnostic_samples=t["kfac_diagnostic_samples"],
