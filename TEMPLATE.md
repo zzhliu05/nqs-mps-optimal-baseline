@@ -15,6 +15,12 @@ Backflow MPS VMC jobs.
 - KFAC/natural gradient, constant `lr=5e-3`, damping `1e-3`.
 - Maximum natural-gradient direction norm 10.
 
+KFAC remains the default. An exact sample-space stochastic reconfiguration
+path is available by setting `training.optimizer` to `"sr"`; it uses the same
+learning rate, damping, and direction-norm controls. See
+`configs/nphi51_tk0_params_0p2m_sr_2000.json` and the memory warning in the
+README before using it for production runs.
+
 ## Canonical configs
 
 - Two-layer 0.2M baseline:

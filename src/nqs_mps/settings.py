@@ -121,8 +121,8 @@ def validate(settings):
         raise ValueError("hidden_sizes must be a nonempty list of positive integers")
     if n["bond_dim"] <= 0 or n["embed_dim"] <= 0 or n["conv_kernel_size"] <= 0 or n["conv_kernel_size"] % 2 != 1:
         raise ValueError("Invalid bond/embed size or convolution kernel (must be odd)")
-    if t["optimizer"] not in {"kfac", "adam"} or t["steps"] < 1:
-        raise ValueError("Require optimizer kfac/adam and positive steps")
+    if t["optimizer"] not in {"kfac", "sr", "adam"} or t["steps"] < 1:
+        raise ValueError("Require optimizer kfac/sr/adam and positive steps")
     if n["generation"] == "direct" and t["optimizer"] == "kfac":
         raise ValueError("Direct MPS has no MLP KFAC factors; select adam")
     if p["chains"] <= 0 or p["burn"] < 0 or p["between"] < 0:
@@ -186,6 +186,11 @@ def core_config(settings, output):
                                          SamplerConfig, OptimizerConfig, TrainingConfig, OutputConfig)
     s, n, p, t, e = (settings[k] for k in SECTIONS)
     output = Path(output)
+    optimizer_name = {
+        "kfac": "natural_gradient",
+        "sr": "sr",
+        "adam": "adam",
+    }[t["optimizer"]]
     result = RunConfig(
         system=SystemConfig(**s),
         network=NetworkConfig(k=1, architecture="mps", num_sites=s["nphi"],
@@ -195,7 +200,7 @@ def core_config(settings, output):
             mps_bond_dim=n["bond_dim"], mps_backflow_embed_dim=n["embed_dim"]),
         sampler=SamplerConfig(proposal_mode=p["proposal"], n_chains=p["chains"],
             n_burn=p["burn"], n_between=p["between"], n_samples=1, prob_n_samples=0),
-        optimizer=OptimizerConfig(name="natural_gradient" if t["optimizer"] == "kfac" else "adam",
+        optimizer=OptimizerConfig(name=optimizer_name,
             lr=t["learning_rate"], constant_lr=True, sr_diag_shift=t["damping"], max_sr_step_norm=t["max_step_norm"]),
         training=TrainingConfig(optimize_method="vmc", n_steps=t["steps"], min_steps=t["steps"],
             seed=t["seed"], vmc_row_batch_size=e["chain_batch"], vmc_chain_batch_size=e["chain_batch"],

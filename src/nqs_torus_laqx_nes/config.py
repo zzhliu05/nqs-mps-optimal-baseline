@@ -386,6 +386,7 @@ class OptimizerConfig:
     def validate(self) -> None:
         if self.name not in {
             "natural_gradient",
+            "sr",
             "signed_gradient",
             "muon",
             "adam",

@@ -9,6 +9,7 @@ from functools import partial
 
 import jax
 import jax.numpy as jnp
+import jax.scipy.linalg as jsp_linalg
 import jax.scipy.sparse.linalg as jsp_sparse_linalg
 import numpy as np
 from jax.flatten_util import ravel_pytree
@@ -3199,6 +3200,133 @@ def natural_gradient_update(
     }
 
 
+def _solve_minsr_design(design, gradient, diagonal_shift):
+    """Solve ``(A.T A + shift I) delta = -gradient`` in sample space."""
+
+    design = jnp.asarray(design, dtype=jnp.float32)
+    gradient = jnp.asarray(gradient, dtype=jnp.float32)
+    shift = jnp.maximum(jnp.asarray(diagonal_shift, dtype=jnp.float32), 1e-8)
+    precision = jax.lax.Precision.HIGHEST
+    kernel = jnp.matmul(design, design.T, precision=precision)
+    kernel = kernel + shift * jnp.eye(kernel.shape[0], dtype=kernel.dtype)
+    rhs = jnp.matmul(design, gradient, precision=precision)
+    chol = jnp.linalg.cholesky(kernel)
+    intermediate = jsp_linalg.solve_triangular(chol, rhs, lower=True)
+    dual = jsp_linalg.solve_triangular(chol.T, intermediate, lower=False)
+    projected = jnp.matmul(design.T, dual, precision=precision)
+    return -(gradient - projected) / shift
+
+
+def minsr_update(
+    params,
+    states,
+    grad_tree,
+    step: int,
+    net_cfg: NetworkConfig,
+    opt_cfg: OptimizerConfig,
+    total_steps: int,
+    metric_positions=None,
+    metric_batch_size: int | None = None,
+):
+    """Exact shifted SR using a real sample-space (MinSR) solve.
+
+    For real parameters and complex log-derivatives ``O``, the Fisher matrix is
+    ``Re(O.H @ O) / Ns``. Writing its centered real and imaginary parts as a
+    ``(2 Ns) x Np`` real design matrix avoids materializing the ``Np x Np``
+    Fisher matrix used by the legacy dense natural-gradient implementation.
+    """
+
+    total_start = time.perf_counter()
+    theta, unravel = ravel_pytree(params)
+    if metric_positions is None:
+        metric_states = build_metric_state_batches(states, net_cfg)
+    else:
+        metric_positions = jnp.asarray(metric_positions, dtype=jnp.int64)
+        if metric_positions.ndim == 1:
+            metric_positions = metric_positions[:, None]
+        metric_states = occupation_states_from_positions(
+            states, metric_positions, net_cfg
+        )
+
+    sample_count = int(metric_states.shape[0])
+    if sample_count < 1:
+        raise ValueError("SR requires at least one metric sample.")
+    batch_size = sample_count
+    if metric_batch_size is not None:
+        batch_size = max(1, min(sample_count, int(metric_batch_size)))
+
+    dmat_start = time.perf_counter()
+    jacobian_chunks = []
+    for start in range(0, sample_count, batch_size):
+        state_chunk = metric_states[start : start + batch_size]
+
+        def score_components(flat_params):
+            scores = determinant_sr_scalars(
+                unravel(flat_params), state_chunk, net_cfg
+            )
+            return jnp.stack((jnp.real(scores), jnp.imag(scores)), axis=1)
+
+        jacobian_chunks.append(jax.jacrev(score_components)(theta))
+    score_jacobian = (
+        jacobian_chunks[0]
+        if len(jacobian_chunks) == 1
+        else jnp.concatenate(jacobian_chunks, axis=0)
+    ).astype(jnp.float32)
+    score_jacobian.block_until_ready()
+    time_dmat = time.perf_counter() - dmat_start
+
+    design_start = time.perf_counter()
+    centered = score_jacobian - jnp.mean(
+        score_jacobian, axis=0, keepdims=True
+    )
+    # Interleaving real/imaginary rows avoids a large transpose-copy. Row
+    # ordering does not change A.T @ A or the sample-space solve.
+    design = centered.reshape((2 * sample_count, theta.size)) / jnp.sqrt(
+        jnp.asarray(sample_count, dtype=jnp.float32)
+    )
+    grad_flat, _ = ravel_pytree(grad_tree)
+    grad_flat = jnp.real(grad_flat).astype(jnp.float32)
+    design.block_until_ready()
+    grad_flat.block_until_ready()
+    del centered, score_jacobian, jacobian_chunks
+    time_design = time.perf_counter() - design_start
+
+    solve_start = time.perf_counter()
+    delta = _solve_minsr_design(design, grad_flat, opt_cfg.sr_diag_shift)
+    delta.block_until_ready()
+    time_solve = time.perf_counter() - solve_start
+
+    update_start = time.perf_counter()
+    delta_norm = float(jnp.linalg.norm(delta))
+    trust_scale = 1.0
+    if (
+        opt_cfg.max_sr_step_norm > 0
+        and delta_norm > opt_cfg.max_sr_step_norm
+    ):
+        trust_scale = opt_cfg.max_sr_step_norm / delta_norm
+        delta = delta * trust_scale
+    lr = learning_rate_at_step(opt_cfg, step, total_steps)
+    applied_delta = lr * delta
+    new_theta = theta + applied_delta
+    new_theta.block_until_ready()
+    time_update = time.perf_counter() - update_start
+    return unravel(new_theta), {
+        "optimizer_impl": "minsr",
+        "lr": lr,
+        "grad_norm": float(jnp.linalg.norm(grad_flat)),
+        "delta_norm": delta_norm,
+        "applied_update_norm": float(jnp.linalg.norm(applied_delta)),
+        "trust_region_scale": float(trust_scale),
+        "sr_samples": sample_count,
+        "sr_kernel_dim": 2 * sample_count,
+        "time_dmat": time_dmat,
+        "time_design": time_design,
+        "time_solve": time_solve,
+        "time_update": time_update,
+        "time_sr_total": time.perf_counter() - total_start,
+    }
+
+
 def continuous_natural_gradient_update(
     params,
     states,
@@ -3467,6 +3595,18 @@ def apply_optimizer_update(
         new_params, stats = signed_gradient_update(
             params, grad_tree, step, opt_cfg, total_steps
         )
+    elif opt_cfg.name == "sr":
+        new_params, stats = minsr_update(
+            params,
+            states,
+            grad_tree,
+            step,
+            net_cfg,
+            opt_cfg,
+            total_steps,
+            metric_positions=metric_positions,
+            metric_batch_size=metric_batch_size,
+        )
     else:
         if (
             net_cfg.architecture == "mps"
@@ -3593,6 +3733,19 @@ def optimizer_log_suffix(
             f"{cond_text} tr={stats['trust_region_scale']:.3e} "
             f"time(opt={time_update_total:.3f}s, "
             f"factors={stats['time_factors']:.3f}s, "
+            f"solve={stats['time_solve']:.3f}s, "
+            f"update={stats['time_update']:.3f}s)"
+        )
+    if stats.get("optimizer_impl") == "minsr":
+        return (
+            f"opt=sr solver=minsr grad={stats['grad_norm']:.3e} "
+            f"|delta|={stats['delta_norm']:.3e} "
+            f"|dtheta|={stats['applied_update_norm']:.3e}{lr_text} "
+            f"samples={stats['sr_samples']} kernel={stats['sr_kernel_dim']} "
+            f"tr={stats['trust_region_scale']:.3e} "
+            f"time(opt={time_update_total:.3f}s, "
+            f"dmat={stats['time_dmat']:.3f}s, "
+            f"design={stats['time_design']:.3f}s, "
             f"solve={stats['time_solve']:.3f}s, "
             f"update={stats['time_update']:.3f}s)"
         )

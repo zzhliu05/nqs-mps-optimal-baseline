@@ -26,6 +26,22 @@ controlled three-layer comparison uses `233 x 233 x 233` and 200995
 parameters. All other physics, sampling, optimizer, batching, and kernel
 settings are unchanged.
 
+## Stochastic reconfiguration
+
+Set `training.optimizer` to `"sr"` to use exact shifted stochastic
+reconfiguration through a sample-space MinSR solve. The implementation uses
+the same sampled states and exact local-energy gradient as KFAC, centers the
+complex log-wavefunction derivatives, and solves the equivalent real
+`2 * estimator_chains` sample kernel. `training.damping`,
+`training.learning_rate`, and `training.max_step_norm` retain their existing
+meanings. The production default remains `"kfac"`.
+
+The canonical opt-in example is
+`configs/nphi51_tk0_params_0p2m_sr_2000.json`. Its Jacobian storage scales as
+`O(2 * estimator_chains * parameters)` and its dense sample solve as
+`O((2 * estimator_chains)^3)`, so benchmark memory and optimizer time before a
+long run.
+
 ## Run
 
 Use Python 3.10+ with a CUDA-compatible JAX installation. Launch from the
