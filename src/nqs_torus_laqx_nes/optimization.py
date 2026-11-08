@@ -1517,9 +1517,11 @@ def kfac_natural_gradient_update(
             lambda x: x * trust_scale, delta_tree
         )
         delta_flat, _ = ravel_pytree(delta_tree)
+    parameter_trust_scale = trust_scale
     lr = learning_rate_at_step(opt_cfg, step, total_steps)
+    wavefunction_trust_scale = 1.0
 
-    if opt_cfg.kfac_diagnostics:
+    if opt_cfg.kfac_diagnostics or opt_cfg.wavefunction_trust_kl is not None:
         diagnostic_count = min(
             int(metric_states.shape[0]), int(opt_cfg.kfac_diagnostic_samples)
         )
@@ -1540,8 +1542,8 @@ def kfac_natural_gradient_update(
             return logabsdet + 1j * jnp.angle(sign)
 
         raw_tangent = raw_delta_flat.astype(theta_flat.dtype)
-        applied_scale = lr * trust_scale
-        finite_difference_scale = max(applied_scale, 1e-8)
+        candidate_scale = lr * parameter_trust_scale
+        finite_difference_scale = max(candidate_scale, 1e-8)
         scores = score_fn(theta_flat)
         scores_plus = score_fn(
             theta_flat + finite_difference_scale * raw_tangent
@@ -1560,7 +1562,33 @@ def kfac_natural_gradient_update(
         raw_sampling_kl = 2.0 * jnp.mean(
             jnp.real(centered_direction) ** 2
         )
-        actual_score_change = scores_plus - scores
+        candidate_predicted_kl = float(
+            raw_sampling_kl * candidate_scale**2
+        )
+        if (
+            opt_cfg.wavefunction_trust_kl is not None
+            and candidate_predicted_kl > opt_cfg.wavefunction_trust_kl
+        ):
+            wavefunction_trust_scale = float(
+                np.sqrt(
+                    opt_cfg.wavefunction_trust_kl
+                    / max(candidate_predicted_kl, 1e-300)
+                )
+            )
+            trust_scale *= wavefunction_trust_scale
+            delta_tree = jax.tree_util.tree_map(
+                lambda x: x * wavefunction_trust_scale, delta_tree
+            )
+            delta_flat, _ = ravel_pytree(delta_tree)
+        applied_scale = lr * trust_scale
+        if wavefunction_trust_scale < 1.0:
+            applied_scores = score_fn(
+                theta_flat + applied_scale * raw_tangent
+            )
+            applied_scores = block_until_ready_tree(applied_scores)
+        else:
+            applied_scores = scores_plus
+        actual_score_change = applied_scores - scores
         centered_actual_change = (
             actual_score_change - jnp.mean(actual_score_change)
         )
@@ -1577,6 +1605,7 @@ def kfac_natural_gradient_update(
                 ),
                 "raw_fisher_quadratic": float(raw_fisher_quad),
                 "raw_sampling_kl_quadratic": float(raw_sampling_kl),
+                "candidate_predicted_sampling_kl": candidate_predicted_kl,
                 "applied_fisher_quadratic": float(
                     raw_fisher_quad * applied_scale**2
                 ),
@@ -1592,9 +1621,15 @@ def kfac_natural_gradient_update(
                 "diagnostic_finite_difference_scale": float(
                     finite_difference_scale
                 ),
+                "wavefunction_trust_kl_target": (
+                    float(opt_cfg.wavefunction_trust_kl)
+                    if opt_cfg.wavefunction_trust_kl is not None
+                    else np.nan
+                ),
+                "wavefunction_trust_scale": wavefunction_trust_scale,
             }
         )
-        if opt_cfg.kfac_trace_probes:
+        if opt_cfg.kfac_diagnostics and opt_cfg.kfac_trace_probes:
             probe_values = []
             probe_scale = 0.05 / np.sqrt(max(1, int(theta_flat.size)))
             for probe_index in range(int(opt_cfg.kfac_trace_probes)):
@@ -1638,7 +1673,9 @@ def kfac_natural_gradient_update(
         "raw_delta_rms": raw_delta_norm / np.sqrt(max(1, int(raw_delta_flat.size))),
         "delta_norm": float(jnp.linalg.norm(delta_flat)),
         "applied_update_norm": float(jnp.linalg.norm(lr * delta_flat)),
+        "parameter_trust_scale": float(parameter_trust_scale),
         "trust_region_scale": float(trust_scale),
+        "wavefunction_trust_scale": float(wavefunction_trust_scale),
         "kfac_cond_max": kfac_cond_max,
         "time_factors": time_factors,
         "time_solve": time_solve,
