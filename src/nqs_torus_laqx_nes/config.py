@@ -379,6 +379,9 @@ class OptimizerConfig:
     cg_tol: float = 1e-8
     cg_maxiter: int = 2000
     max_sr_step_norm: float = 10.0
+    max_sr_step_norm_final: float | None = None
+    max_sr_step_norm_ramp_start: int = 0
+    max_sr_step_norm_ramp_end: int = 0
     wavefunction_trust_kl: float | None = None
     gradient_clip_norm: float | None = None
     adam_b1: float = 0.9
@@ -438,6 +441,20 @@ class OptimizerConfig:
             raise ValueError("Invalid natural-gradient solver settings.")
         if self.max_sr_step_norm < 0:
             raise ValueError("max_sr_step_norm must be non-negative.")
+        if (
+            self.max_sr_step_norm_final is not None
+            and self.max_sr_step_norm_final <= 0
+        ):
+            raise ValueError(
+                "max_sr_step_norm_final must be positive when provided."
+            )
+        if self.max_sr_step_norm_final is not None and not (
+            0 <= self.max_sr_step_norm_ramp_start
+            < self.max_sr_step_norm_ramp_end
+        ):
+            raise ValueError(
+                "step-norm ramp requires 0 <= start < end."
+            )
         if (
             self.wavefunction_trust_kl is not None
             and self.wavefunction_trust_kl <= 0

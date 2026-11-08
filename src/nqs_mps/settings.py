@@ -46,6 +46,9 @@ class Training:
     decay_rate: int = 1000
     damping: float = 0.001
     max_step_norm: float = 10.0
+    max_step_norm_final: float | None = None
+    max_step_norm_ramp_start: int = 0
+    max_step_norm_ramp_end: int = 0
     wavefunction_trust_kl: float | None = None
     gradient_clip_norm: float | None = None
     sr_samples: int | None = None
@@ -103,6 +106,8 @@ def validate(settings):
                     "sampling": ("chains", "burn", "between"),
                     "training": ("steps", "seed", "sr_jacobian_batch_size",
                                  "decay_rate",
+                                 "max_step_norm_ramp_start",
+                                 "max_step_norm_ramp_end",
                                  "kfac_diagnostic_samples", "kfac_trace_probes"),
                     "execution": tuple(k for k in e if k not in {
                         "backend", "neighbor_execution", "first_layer_execution",
@@ -134,6 +139,12 @@ def validate(settings):
         value = t["wavefunction_trust_kl"]
         if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:
             raise ValueError("training.wavefunction_trust_kl must be null or finite and positive")
+    if t["max_step_norm_final"] is not None:
+        value = t["max_step_norm_final"]
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:
+            raise ValueError("training.max_step_norm_final must be null or finite and positive")
+        if not 0 <= t["max_step_norm_ramp_start"] < t["max_step_norm_ramp_end"] <= t["steps"]:
+            raise ValueError("Require 0 <= step-norm ramp start < end <= training steps")
     if n["generation"] not in {"backflow", "sitewise", "tensor_bank", "direct", "local_conv_backflow", "global_backflow"}:
         raise ValueError("Unsupported MPS generation in maintained interface")
     if not isinstance(n["hidden_sizes"], list) or not n["hidden_sizes"] or any(type(w) is not int or w <= 0 for w in n["hidden_sizes"]):
@@ -241,6 +252,9 @@ def core_config(settings, output):
             kfac_diagnostic_samples=t["kfac_diagnostic_samples"],
             kfac_trace_probes=t["kfac_trace_probes"],
             max_sr_step_norm=t["max_step_norm"],
+            max_sr_step_norm_final=t["max_step_norm_final"],
+            max_sr_step_norm_ramp_start=t["max_step_norm_ramp_start"],
+            max_sr_step_norm_ramp_end=t["max_step_norm_ramp_end"],
             wavefunction_trust_kl=t["wavefunction_trust_kl"],
             gradient_clip_norm=t["gradient_clip_norm"]),
         training=TrainingConfig(optimize_method="vmc", n_steps=t["steps"], min_steps=t["steps"],

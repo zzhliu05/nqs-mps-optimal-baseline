@@ -1218,6 +1218,24 @@ def kfac_natural_gradient_update(
         raise ValueError("MPS KFAC currently supports only k=1.")
 
     total_start = time.perf_counter()
+    wavefunction_trust_kl_target = opt_cfg.wavefunction_trust_kl
+    max_sr_step_norm_target = opt_cfg.max_sr_step_norm
+    if (
+        opt_cfg.max_sr_step_norm_final is not None
+    ):
+        ramp_start = opt_cfg.max_sr_step_norm_ramp_start
+        ramp_end = opt_cfg.max_sr_step_norm_ramp_end
+        ramp_fraction = float(
+            np.clip((step - ramp_start) / (ramp_end - ramp_start), 0.0, 1.0)
+        )
+        max_sr_step_norm_target = (
+            max_sr_step_norm_target
+            + ramp_fraction
+            * (
+                opt_cfg.max_sr_step_norm_final
+                - max_sr_step_norm_target
+            )
+        )
     if metric_positions is None:
         metric_states = build_metric_state_batches(states, net_cfg)
     else:
@@ -1509,10 +1527,10 @@ def kfac_natural_gradient_update(
     delta_norm = raw_delta_norm
     trust_scale = 1.0
     if (
-        opt_cfg.max_sr_step_norm > 0
-        and delta_norm > opt_cfg.max_sr_step_norm
+        max_sr_step_norm_target > 0
+        and delta_norm > max_sr_step_norm_target
     ):
-        trust_scale = opt_cfg.max_sr_step_norm / delta_norm
+        trust_scale = max_sr_step_norm_target / delta_norm
         delta_tree = jax.tree_util.tree_map(
             lambda x: x * trust_scale, delta_tree
         )
@@ -1521,7 +1539,7 @@ def kfac_natural_gradient_update(
     lr = learning_rate_at_step(opt_cfg, step, total_steps)
     wavefunction_trust_scale = 1.0
 
-    if opt_cfg.kfac_diagnostics or opt_cfg.wavefunction_trust_kl is not None:
+    if opt_cfg.kfac_diagnostics or wavefunction_trust_kl_target is not None:
         diagnostic_count = min(
             int(metric_states.shape[0]), int(opt_cfg.kfac_diagnostic_samples)
         )
@@ -1566,12 +1584,12 @@ def kfac_natural_gradient_update(
             raw_sampling_kl * candidate_scale**2
         )
         if (
-            opt_cfg.wavefunction_trust_kl is not None
-            and candidate_predicted_kl > opt_cfg.wavefunction_trust_kl
+            wavefunction_trust_kl_target is not None
+            and candidate_predicted_kl > wavefunction_trust_kl_target
         ):
             wavefunction_trust_scale = float(
                 np.sqrt(
-                    opt_cfg.wavefunction_trust_kl
+                    wavefunction_trust_kl_target
                     / max(candidate_predicted_kl, 1e-300)
                 )
             )
@@ -1622,8 +1640,8 @@ def kfac_natural_gradient_update(
                     finite_difference_scale
                 ),
                 "wavefunction_trust_kl_target": (
-                    float(opt_cfg.wavefunction_trust_kl)
-                    if opt_cfg.wavefunction_trust_kl is not None
+                    float(wavefunction_trust_kl_target)
+                    if wavefunction_trust_kl_target is not None
                     else np.nan
                 ),
                 "wavefunction_trust_scale": wavefunction_trust_scale,
@@ -1674,6 +1692,7 @@ def kfac_natural_gradient_update(
         "delta_norm": float(jnp.linalg.norm(delta_flat)),
         "applied_update_norm": float(jnp.linalg.norm(lr * delta_flat)),
         "parameter_trust_scale": float(parameter_trust_scale),
+        "max_sr_step_norm_target": float(max_sr_step_norm_target),
         "trust_region_scale": float(trust_scale),
         "wavefunction_trust_scale": float(wavefunction_trust_scale),
         "kfac_cond_max": kfac_cond_max,
