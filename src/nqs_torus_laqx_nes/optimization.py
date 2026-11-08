@@ -1063,6 +1063,85 @@ def _solve_kfac_blocks(
     return deltas, condition_max
 
 
+def _project_wavefunction_norm_gauge(
+    params,
+    delta_tree,
+    metric_states,
+    net_cfg: NetworkConfig,
+    sample_count: int,
+):
+    start = time.perf_counter()
+    gauge_count = min(int(metric_states.shape[0]), int(sample_count))
+    gauge_states = metric_states[:gauge_count]
+    theta_flat, unravel_params = ravel_pytree(params)
+    pre_gauge_delta_flat, unravel_delta = ravel_pytree(delta_tree)
+
+    def sampled_mean_logabs(flat_params):
+        flat_states = gauge_states.reshape((-1, gauge_states.shape[-1]))
+        phi_flat = batched_wavefunction_matrix(
+            unravel_params(flat_params), flat_states, net_cfg
+        )
+        psi_matrices = phi_flat.reshape(
+            (gauge_count, net_cfg.k, net_cfg.k)
+        )
+        _, logabsdet = jnp.linalg.slogdet(psi_matrices)
+        return jnp.mean(logabsdet)
+
+    gauge_gradient = jax.grad(sampled_mean_logabs)(theta_flat)
+    gauge_gradient, pre_gauge_delta_flat = block_until_ready_tree(
+        (gauge_gradient, pre_gauge_delta_flat)
+    )
+    gauge_gradient64 = gauge_gradient.astype(jnp.float64)
+    pre_gauge_delta64 = pre_gauge_delta_flat.astype(jnp.float64)
+    gauge_norm_sq = jnp.vdot(gauge_gradient64, gauge_gradient64).real
+    gauge_overlap = jnp.vdot(
+        gauge_gradient64, pre_gauge_delta64
+    ).real
+    projection_coefficient = gauge_overlap / jnp.maximum(
+        gauge_norm_sq, 1e-30
+    )
+    removed_delta = projection_coefficient * gauge_gradient64
+    projected_delta_flat = (
+        pre_gauge_delta64 - removed_delta
+    ).astype(pre_gauge_delta_flat.dtype)
+    projected_overlap = jnp.vdot(
+        gauge_gradient64, projected_delta_flat.astype(jnp.float64)
+    ).real
+    (
+        gauge_norm_sq,
+        gauge_overlap,
+        projection_coefficient,
+        removed_delta,
+        projected_delta_flat,
+        projected_overlap,
+    ) = block_until_ready_tree(
+        (
+            gauge_norm_sq,
+            gauge_overlap,
+            projection_coefficient,
+            removed_delta,
+            projected_delta_flat,
+            projected_overlap,
+        )
+    )
+    projected_tree = block_until_ready_tree(
+        unravel_delta(projected_delta_flat)
+    )
+    pre_gauge_norm = float(jnp.linalg.norm(pre_gauge_delta64))
+    removed_norm = float(jnp.linalg.norm(removed_delta))
+    return projected_tree, {
+        "gauge_projection_samples": gauge_count,
+        "gauge_gradient_norm": float(jnp.sqrt(gauge_norm_sq)),
+        "gauge_overlap_before": float(gauge_overlap),
+        "gauge_overlap_after": float(projected_overlap),
+        "gauge_projection_coefficient": float(projection_coefficient),
+        "gauge_removed_delta_norm": removed_norm,
+        "gauge_removed_fraction": removed_norm / max(pre_gauge_norm, 1e-300),
+        "pre_gauge_delta_norm": pre_gauge_norm,
+        "time_gauge_projection": time.perf_counter() - start,
+    }
+
+
 def site_head_backflow_kfac_update(
     params,
     states,
@@ -1149,6 +1228,85 @@ def site_head_backflow_kfac_update(
         delta_tree["mps"]["jastrow_mlp"] = jastrow_delta
     delta_tree = block_until_ready_tree(delta_tree)
     time_solve = time.perf_counter() - solve_start
+
+    gauge_stats = {}
+    if opt_cfg.project_wavefunction_norm_gauge:
+        gauge_start = time.perf_counter()
+        gauge_count = min(
+            int(metric_states.shape[0]), int(opt_cfg.kfac_diagnostic_samples)
+        )
+        gauge_states = metric_states[:gauge_count]
+        theta_flat, unravel_params = ravel_pytree(params)
+        pre_gauge_delta_flat, unravel_delta = ravel_pytree(delta_tree)
+
+        def sampled_mean_logabs(flat_params):
+            flat_states = gauge_states.reshape(
+                (-1, gauge_states.shape[-1])
+            )
+            phi_flat = batched_wavefunction_matrix(
+                unravel_params(flat_params), flat_states, net_cfg
+            )
+            psi_matrices = phi_flat.reshape(
+                (gauge_count, net_cfg.k, net_cfg.k)
+            )
+            _, logabsdet = jnp.linalg.slogdet(psi_matrices)
+            return jnp.mean(logabsdet)
+
+        gauge_gradient = jax.grad(sampled_mean_logabs)(theta_flat)
+        gauge_gradient, pre_gauge_delta_flat = block_until_ready_tree(
+            (gauge_gradient, pre_gauge_delta_flat)
+        )
+        gauge_gradient64 = gauge_gradient.astype(jnp.float64)
+        pre_gauge_delta64 = pre_gauge_delta_flat.astype(jnp.float64)
+        gauge_norm_sq = jnp.vdot(
+            gauge_gradient64, gauge_gradient64
+        ).real
+        gauge_overlap = jnp.vdot(
+            gauge_gradient64, pre_gauge_delta64
+        ).real
+        projection_coefficient = gauge_overlap / jnp.maximum(
+            gauge_norm_sq, 1e-30
+        )
+        removed_delta = projection_coefficient * gauge_gradient64
+        projected_delta_flat = (
+            pre_gauge_delta64 - removed_delta
+        ).astype(pre_gauge_delta_flat.dtype)
+        projected_overlap = jnp.vdot(
+            gauge_gradient64,
+            projected_delta_flat.astype(jnp.float64),
+        ).real
+        (
+            gauge_norm_sq,
+            gauge_overlap,
+            projection_coefficient,
+            removed_delta,
+            projected_delta_flat,
+            projected_overlap,
+        ) = block_until_ready_tree(
+            (
+                gauge_norm_sq,
+                gauge_overlap,
+                projection_coefficient,
+                removed_delta,
+                projected_delta_flat,
+                projected_overlap,
+            )
+        )
+        delta_tree = unravel_delta(projected_delta_flat)
+        delta_tree = block_until_ready_tree(delta_tree)
+        pre_gauge_norm = float(jnp.linalg.norm(pre_gauge_delta64))
+        removed_norm = float(jnp.linalg.norm(removed_delta))
+        gauge_stats = {
+            "gauge_projection_samples": gauge_count,
+            "gauge_gradient_norm": float(jnp.sqrt(gauge_norm_sq)),
+            "gauge_overlap_before": float(gauge_overlap),
+            "gauge_overlap_after": float(projected_overlap),
+            "gauge_projection_coefficient": float(projection_coefficient),
+            "gauge_removed_delta_norm": removed_norm,
+            "gauge_removed_fraction": removed_norm / max(pre_gauge_norm, 1e-300),
+            "pre_gauge_delta_norm": pre_gauge_norm,
+            "time_gauge_projection": time.perf_counter() - gauge_start,
+        }
 
     grad_flat, _ = ravel_pytree(grad_tree)
     delta_flat, _ = ravel_pytree(delta_tree)
@@ -1519,6 +1677,16 @@ def kfac_natural_gradient_update(
     delta_tree = block_until_ready_tree(delta_tree)
     time_solve = time.perf_counter() - solve_start
 
+    gauge_stats = {}
+    if opt_cfg.project_wavefunction_norm_gauge:
+        delta_tree, gauge_stats = _project_wavefunction_norm_gauge(
+            params,
+            delta_tree,
+            metric_states,
+            net_cfg,
+            opt_cfg.kfac_diagnostic_samples,
+        )
+
     grad_flat, _ = ravel_pytree(grad_tree)
     grad_norm = float(jnp.linalg.norm(grad_flat.astype(jnp.float64)))
     delta_flat, _ = ravel_pytree(delta_tree)
@@ -1700,6 +1868,7 @@ def kfac_natural_gradient_update(
         "time_solve": time_solve,
         "time_update": time_update,
         "time_sr_total": time.perf_counter() - total_start,
+        **gauge_stats,
         **diagnostic_stats,
     }
 

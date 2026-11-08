@@ -383,6 +383,7 @@ class OptimizerConfig:
     max_sr_step_norm_ramp_start: int = 0
     max_sr_step_norm_ramp_end: int = 0
     wavefunction_trust_kl: float | None = None
+    project_wavefunction_norm_gauge: bool = False
     gradient_clip_norm: float | None = None
     adam_b1: float = 0.9
     adam_b2: float = 0.999
@@ -462,6 +463,8 @@ class OptimizerConfig:
             raise ValueError(
                 "wavefunction_trust_kl must be positive when provided."
             )
+        if not isinstance(self.project_wavefunction_norm_gauge, bool):
+            raise ValueError("project_wavefunction_norm_gauge must be boolean.")
         if (
             self.gradient_clip_norm is not None
             and self.gradient_clip_norm <= 0
