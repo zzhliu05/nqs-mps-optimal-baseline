@@ -384,6 +384,7 @@ class OptimizerConfig:
     max_sr_step_norm_ramp_end: int = 0
     wavefunction_trust_kl: float | None = None
     project_wavefunction_norm_gauge: bool = False
+    project_wavefunction_norm_gauge_fisher: bool = False
     gradient_clip_norm: float | None = None
     adam_b1: float = 0.9
     adam_b2: float = 0.999
@@ -465,6 +466,17 @@ class OptimizerConfig:
             )
         if not isinstance(self.project_wavefunction_norm_gauge, bool):
             raise ValueError("project_wavefunction_norm_gauge must be boolean.")
+        if not isinstance(self.project_wavefunction_norm_gauge_fisher, bool):
+            raise ValueError(
+                "project_wavefunction_norm_gauge_fisher must be boolean."
+            )
+        if (
+            self.project_wavefunction_norm_gauge
+            and self.project_wavefunction_norm_gauge_fisher
+        ):
+            raise ValueError(
+                "Euclidean and Fisher gauge projections are mutually exclusive."
+            )
         if (
             self.gradient_clip_norm is not None
             and self.gradient_clip_norm <= 0

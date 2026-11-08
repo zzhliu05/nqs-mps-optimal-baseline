@@ -51,6 +51,7 @@ class Training:
     max_step_norm_ramp_end: int = 0
     wavefunction_trust_kl: float | None = None
     project_wavefunction_norm_gauge: bool = False
+    project_wavefunction_norm_gauge_fisher: bool = False
     gradient_clip_norm: float | None = None
     sr_samples: int | None = None
     sr_jacobian_batch_size: int = 32
@@ -168,6 +169,10 @@ def validate(settings):
         raise ValueError("training.kfac_diagnostics must be boolean")
     if type(t["project_wavefunction_norm_gauge"]) is not bool:
         raise ValueError("training.project_wavefunction_norm_gauge must be boolean")
+    if type(t["project_wavefunction_norm_gauge_fisher"]) is not bool:
+        raise ValueError("training.project_wavefunction_norm_gauge_fisher must be boolean")
+    if t["project_wavefunction_norm_gauge"] and t["project_wavefunction_norm_gauge_fisher"]:
+        raise ValueError("Euclidean and Fisher gauge projections are mutually exclusive")
     if n["generation"] == "direct" and t["optimizer"] == "kfac":
         raise ValueError("Direct MPS has no MLP KFAC factors; select adam")
     if p["chains"] <= 0 or p["burn"] < 0 or p["between"] < 0:
@@ -260,6 +265,7 @@ def core_config(settings, output):
             max_sr_step_norm_ramp_end=t["max_step_norm_ramp_end"],
             wavefunction_trust_kl=t["wavefunction_trust_kl"],
             project_wavefunction_norm_gauge=t["project_wavefunction_norm_gauge"],
+            project_wavefunction_norm_gauge_fisher=t["project_wavefunction_norm_gauge_fisher"],
             gradient_clip_norm=t["gradient_clip_norm"]),
         training=TrainingConfig(optimize_method="vmc", n_steps=t["steps"], min_steps=t["steps"],
             seed=t["seed"], vmc_row_batch_size=e["chain_batch"], vmc_chain_batch_size=e["chain_batch"],

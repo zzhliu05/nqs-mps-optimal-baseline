@@ -1142,6 +1142,30 @@ def _project_wavefunction_norm_gauge(
     }
 
 
+def _wavefunction_norm_gauge_gradient(
+    params,
+    metric_states,
+    net_cfg: NetworkConfig,
+    sample_count: int,
+):
+    gauge_count = min(int(metric_states.shape[0]), int(sample_count))
+    gauge_states = metric_states[:gauge_count]
+
+    def sampled_mean_logabs(tree_params):
+        flat_states = gauge_states.reshape((-1, gauge_states.shape[-1]))
+        phi_flat = batched_wavefunction_matrix(
+            tree_params, flat_states, net_cfg
+        )
+        psi_matrices = phi_flat.reshape(
+            (gauge_count, net_cfg.k, net_cfg.k)
+        )
+        _, logabsdet = jnp.linalg.slogdet(psi_matrices)
+        return jnp.mean(logabsdet)
+
+    gauge_gradient_tree = jax.grad(sampled_mean_logabs)(params)
+    return block_until_ready_tree(gauge_gradient_tree), gauge_count
+
+
 def site_head_backflow_kfac_update(
     params,
     states,
@@ -1678,7 +1702,102 @@ def kfac_natural_gradient_update(
     time_solve = time.perf_counter() - solve_start
 
     gauge_stats = {}
-    if opt_cfg.project_wavefunction_norm_gauge:
+    if opt_cfg.project_wavefunction_norm_gauge_fisher:
+        gauge_start = time.perf_counter()
+        if (
+            net_cfg.architecture != "mps"
+            or local_generation
+            or attention_block_params is not None
+            or jastrow_factors is not None
+        ):
+            raise NotImplementedError(
+                "Fisher gauge projection currently supports only the plain "
+                "MPS tensor-MLP KFAC path."
+            )
+
+        gauge_gradient_tree, gauge_count = (
+            _wavefunction_norm_gauge_gradient(
+                params,
+                metric_states,
+                net_cfg,
+                opt_cfg.kfac_diagnostic_samples,
+            )
+        )
+        negative_inverse_gauge_layers, _ = _solve_kfac_blocks(
+            layer_params,
+            gauge_gradient_tree["mps"][mlp_key],
+            a_factors,
+            g_factors,
+            damping,
+            False,
+        )
+        inverse_gauge_tree = {
+            "mps": {
+                mlp_key: jax.tree_util.tree_map(
+                    lambda value: -value,
+                    negative_inverse_gauge_layers,
+                )
+            }
+        }
+        gauge_flat, _ = ravel_pytree(gauge_gradient_tree)
+        delta_flat_before, unravel_delta = ravel_pytree(delta_tree)
+        inverse_gauge_flat, _ = ravel_pytree(inverse_gauge_tree)
+        gauge_flat64 = gauge_flat.astype(jnp.float64)
+        delta_flat64 = delta_flat_before.astype(jnp.float64)
+        inverse_gauge_flat64 = inverse_gauge_flat.astype(jnp.float64)
+        numerator = jnp.vdot(gauge_flat64, delta_flat64).real
+        denominator = jnp.vdot(
+            gauge_flat64, inverse_gauge_flat64
+        ).real
+        numerator, denominator = block_until_ready_tree(
+            (numerator, denominator)
+        )
+        denominator_value = float(denominator)
+        if not np.isfinite(denominator_value) or denominator_value <= 1e-20:
+            raise FloatingPointError(
+                "Invalid Fisher gauge projection denominator: "
+                f"{denominator_value:.6e}"
+            )
+        coefficient = numerator / denominator
+        removed_delta = coefficient * inverse_gauge_flat64
+        projected_delta_flat = delta_flat64 - removed_delta
+        projected_overlap = jnp.vdot(
+            gauge_flat64, projected_delta_flat
+        ).real
+        (
+            coefficient,
+            removed_delta,
+            projected_delta_flat,
+            projected_overlap,
+        ) = block_until_ready_tree(
+            (
+                coefficient,
+                removed_delta,
+                projected_delta_flat,
+                projected_overlap,
+            )
+        )
+        delta_tree = block_until_ready_tree(
+            unravel_delta(projected_delta_flat.astype(delta_flat_before.dtype))
+        )
+        pre_gauge_norm = float(jnp.linalg.norm(delta_flat64))
+        removed_norm = float(jnp.linalg.norm(removed_delta))
+        gauge_stats = {
+            "gauge_projection_metric": "fisher",
+            "gauge_projection_samples": gauge_count,
+            "gauge_gradient_norm": float(jnp.linalg.norm(gauge_flat64)),
+            "gauge_overlap_before": float(numerator),
+            "gauge_overlap_after": float(projected_overlap),
+            "gauge_fisher_denominator": denominator_value,
+            "gauge_projection_coefficient": float(coefficient),
+            "gauge_removed_delta_norm": removed_norm,
+            "gauge_removed_fraction": (
+                removed_norm / max(pre_gauge_norm, 1e-300)
+            ),
+            "pre_gauge_delta_norm": pre_gauge_norm,
+            "time_gauge_projection": time.perf_counter() - gauge_start,
+        }
+    elif opt_cfg.project_wavefunction_norm_gauge:
         delta_tree, gauge_stats = _project_wavefunction_norm_gauge(
             params,
             delta_tree,
