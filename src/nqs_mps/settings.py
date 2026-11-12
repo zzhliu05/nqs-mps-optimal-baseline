@@ -43,6 +43,8 @@ class Training:
     optimizer: str = "kfac"
     learning_rate: float = 0.005
     learning_rate_schedule: str = "constant"
+    learning_rate_switch_step: int | None = None
+    learning_rate_after_switch: float | None = None
     decay_rate: int = 1000
     damping: float = 0.001
     max_step_norm: float = 10.0
@@ -159,6 +161,27 @@ def validate(settings):
         raise ValueError(
             "training.learning_rate_schedule must be constant or inverse_time"
         )
+    switch_step = t["learning_rate_switch_step"]
+    switch_rate = t["learning_rate_after_switch"]
+    if (switch_step is None) != (switch_rate is None):
+        raise ValueError(
+            "learning_rate_switch_step and learning_rate_after_switch "
+            "must be provided together"
+        )
+    if switch_step is not None:
+        if type(switch_step) is not int or not 1 <= switch_step < t["steps"]:
+            raise ValueError(
+                "learning_rate_switch_step must be in [1, training.steps)"
+            )
+        if (
+            isinstance(switch_rate, bool)
+            or not isinstance(switch_rate, (int, float))
+            or not math.isfinite(switch_rate)
+            or switch_rate <= 0
+        ):
+            raise ValueError("learning_rate_after_switch must be positive")
+        if t["optimizer"] != "kfac":
+            raise ValueError("two-stage learning rate currently supports kfac only")
     if t["decay_rate"] <= 0:
         raise ValueError("training.decay_rate must be positive")
     if t["sr_samples"] is not None and (
@@ -254,6 +277,8 @@ def core_config(settings, output):
         optimizer=OptimizerConfig(name=optimizer_name,
             lr=t["learning_rate"],
             constant_lr=t["learning_rate_schedule"] == "constant",
+            lr_switch_step=t["learning_rate_switch_step"],
+            lr_after_switch=t["learning_rate_after_switch"],
             decay_rate=t["decay_rate"], sr_diag_shift=t["damping"],
             sr_samples=t["sr_samples"], sr_jacobian_batch_size=t["sr_jacobian_batch_size"],
             kfac_diagnostics=t["kfac_diagnostics"],

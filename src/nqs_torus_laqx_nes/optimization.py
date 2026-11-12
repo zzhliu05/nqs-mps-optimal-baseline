@@ -2214,6 +2214,11 @@ def learning_rate_from_count(
 def learning_rate_at_step(
     opt_cfg: OptimizerConfig, step: int, total_steps: int
 ) -> float:
+    if (
+        opt_cfg.lr_switch_step is not None
+        and int(step) > int(opt_cfg.lr_switch_step)
+    ):
+        return float(opt_cfg.lr_after_switch)
     if opt_cfg.constant_lr:
         return float(opt_cfg.lr)
     if opt_cfg.multi_step_lr or opt_cfg.cyclic_lr:

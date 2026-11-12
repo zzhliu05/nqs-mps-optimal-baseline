@@ -363,6 +363,8 @@ class OptimizerConfig:
     name: str = "signed_gradient"
     lr: float = 1e-2
     constant_lr: bool = False
+    lr_switch_step: int | None = None
+    lr_after_switch: float | None = None
     decay_rate: int = 1000
     multi_step_lr: bool = False
     cyclic_lr: bool = False
@@ -407,6 +409,19 @@ class OptimizerConfig:
             raise ValueError(f"Unsupported optimizer: {self.name}")
         if self.lr <= 0:
             raise ValueError("lr must be positive.")
+        if (self.lr_switch_step is None) != (self.lr_after_switch is None):
+            raise ValueError(
+                "lr_switch_step and lr_after_switch must be provided together."
+            )
+        if self.lr_switch_step is not None:
+            if self.lr_switch_step <= 0:
+                raise ValueError("lr_switch_step must be positive.")
+            if self.lr_after_switch <= 0:
+                raise ValueError("lr_after_switch must be positive.")
+            if self.name != "natural_gradient":
+                raise ValueError(
+                    "Two-stage learning rate currently supports KFAC only."
+                )
         if self.sr_samples is not None and self.sr_samples <= 0:
             raise ValueError("sr_samples must be positive when provided.")
         if self.sr_jacobian_batch_size <= 0:
