@@ -2208,32 +2208,44 @@ def _compact_row_reduce_kernel(
     lane = jnp.arange(block_width)
     start = _pallas_load(offsets_ref, (row,), mask=True, other=0)
     stop = _pallas_load(offsets_ref, (row + 1,), mask=True, other=0)
-    index = start + lane
-    valid = index < stop
-    coeff_real = _pallas_load(
-        coeff_real_ref, (index,), mask=valid, other=0.0
-    ).astype(jnp.float32)
-    coeff_imag = _pallas_load(
-        coeff_imag_ref, (index,), mask=valid, other=0.0
-    ).astype(jnp.float32)
-    phi_real = _pallas_load(
-        phi_real_ref, (index,), mask=valid, other=0.0
-    ).astype(jnp.float32)
-    phi_imag = _pallas_load(
-        phi_imag_ref, (index,), mask=valid, other=0.0
-    ).astype(jnp.float32)
-    product_real = coeff_real * phi_real - coeff_imag * phi_imag
-    product_imag = coeff_real * phi_imag + coeff_imag * phi_real
+    blocks = (stop - start + block_width - 1) // block_width
+
+    # A row may span several tiles; block_width is not a truncation limit.
+    def accumulate(block, accumulator):
+        index = start + block * block_width + lane
+        valid = index < stop
+        coeff_real = _pallas_load(
+            coeff_real_ref, (index,), mask=valid, other=0.0
+        ).astype(jnp.float32)
+        coeff_imag = _pallas_load(
+            coeff_imag_ref, (index,), mask=valid, other=0.0
+        ).astype(jnp.float32)
+        phi_real = _pallas_load(
+            phi_real_ref, (index,), mask=valid, other=0.0
+        ).astype(jnp.float32)
+        phi_imag = _pallas_load(
+            phi_imag_ref, (index,), mask=valid, other=0.0
+        ).astype(jnp.float32)
+        return (
+            accumulator[0] + coeff_real * phi_real - coeff_imag * phi_imag,
+            accumulator[1] + coeff_real * phi_imag + coeff_imag * phi_real,
+        )
+
+    product_real, product_imag = jax.lax.fori_loop(
+        0, blocks, accumulate,
+        (jnp.zeros(block_width, dtype=jnp.float32),
+         jnp.zeros(block_width, dtype=jnp.float32)),
+    )
     _pallas_store(
         output_real_ref,
         (row,),
-        jnp.sum(jnp.where(valid, product_real, 0.0)),
+        jnp.sum(product_real),
         mask=True,
     )
     _pallas_store(
         output_imag_ref,
         (row,),
-        jnp.sum(jnp.where(valid, product_imag, 0.0)),
+        jnp.sum(product_imag),
         mask=True,
     )
 
@@ -2247,7 +2259,7 @@ def compact_row_reduce_pallas(
     block_width: int = 1024,
     interpret: bool = False,
 ):
-    """Multiply and reduce sorted compact neighbors without scatter/segment."""
+    """Reduce every entry of each compact row, including rows wider than a tile."""
 
     coeff = jnp.asarray(coeff)
     phi = jnp.asarray(phi)
@@ -2256,8 +2268,8 @@ def compact_row_reduce_pallas(
         raise ValueError("compact row reduction expects matching flat vectors")
     if offsets.ndim != 1 or offsets.shape[0] < 2:
         raise ValueError("compact row offsets must contain row_count + 1 values")
-    if block_width & (block_width - 1):
-        raise ValueError("compact row reduction block width must be a power of two")
+    if block_width <= 0 or block_width & (block_width - 1):
+        raise ValueError("compact row reduction block width must be a positive power of two")
     row_count = offsets.shape[0] - 1
     output_shape = (
         jax.ShapeDtypeStruct((row_count,), jnp.float32),

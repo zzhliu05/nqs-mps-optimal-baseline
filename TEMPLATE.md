@@ -1,19 +1,22 @@
-# NQS MPS Optimal Baseline (2026-11-06)
+# NQS MPS Optimal Baseline (updated 2026-11-18)
 
-This directory is the frozen production template for bitstring, sector-free
-Backflow MPS VMC jobs.
+This directory is the versioned production template for bitstring,
+sector-free Backflow MPS VMC jobs. Historical configs remain available.
 
 ## Canonical settings
 
 - Packed `uint64` bitstrings; no materialized sector table.
 - Symmetric `conserved_pair` proposal, one sampler scan per update.
-- Exact local-energy neighbors.
+- Exact local-energy neighbors with complete multi-tile row reduction.
+- Nphi=51, tk=0, H397 x H397 (304103 parameters), D=10.
+- 4096 chains, burn=40, between=1; no parallel tempering.
 - `compact_gpu_dedup` with 150 chunks.
 - Structured first-layer reuse with fused tail.
 - Fused M4 MPS contraction.
 - `chain_batch=4096`, `forward_batch=32768`.
 - KFAC/natural gradient, constant `lr=5e-3`, damping `1e-3`.
-- Maximum natural-gradient direction norm 10.
+- Maximum natural-gradient direction norm 10 through step 300, then 20.
+- 2000 steps, seed=512039.
 
 KFAC remains the default. An exact sample-space stochastic reconfiguration
 path is available by setting `training.optimizer` to `"sr"`; it uses the same
@@ -23,7 +26,9 @@ README before using it for production runs.
 
 ## Canonical configs
 
-- Two-layer 0.2M baseline:
+- Current complete-H two-layer 0.3M baseline:
+  `configs/nphi51_tk0_full_h_0p3m_2000.json` (`397 x 397`, 304103 params).
+- Historical two-layer 0.2M baseline:
   `configs/nphi51_tk0_params_0p2m_2000.json` (`296 x 296`, 200376 params).
 - Three-layer controlled comparison:
   `configs/nphi51_tk0_0p2m_h233x3_direct_2000.json`
