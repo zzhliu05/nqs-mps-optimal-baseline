@@ -1,9 +1,13 @@
-# NQS MPS Optimal Baseline (updated 2026-11-18)
+# NQS MPS Optimal Baseline (updated 2026-11-19)
 
 This directory is the versioned production template for bitstring,
 sector-free Backflow MPS VMC jobs. Historical configs remain available.
 
 ## Canonical settings
+
+For subsequent Nphi=51 experiments, use this fastest canonical configuration
+as the control and change only the explicitly tested factors. Older execution
+paths are diagnostic controls, not the default benchmark baseline.
 
 - Packed `uint64` bitstrings; no materialized sector table.
 - Symmetric `conserved_pair` proposal, one sampler scan per update.
@@ -12,8 +16,9 @@ sector-free Backflow MPS VMC jobs. Historical configs remain available.
 - 4096 chains, burn=40, between=1; no parallel tempering.
 - `compact_gpu_dedup` with 150 chunks.
 - Structured first-layer reuse with fused tail.
-- Fused M4 MPS contraction.
+- `backend=m4`, selecting fused M3/triplet-tail contraction for Nphi=51.
 - `chain_batch=4096`, `forward_batch=32768`.
+- Neighbor internal tile 1024 with runtime-count skipping of unused tail blocks.
 - KFAC/natural gradient, constant `lr=5e-3`, damping `1e-3`.
 - Maximum natural-gradient direction norm 10 through step 300, then 20.
 - 2000 steps, seed=512039.
@@ -28,6 +33,12 @@ README before using it for production runs.
 
 - Current complete-H two-layer 0.3M baseline:
   `configs/nphi51_tk0_full_h_0p3m_2000.json` (`397 x 397`, 304103 params).
+- Streaming-only comparison, unchanged physical settings:
+  `configs/nphi51_tk0_full_h_0p3m_stream1024_2000.json`.
+- Equivalent explicit name for the current counted1024 baseline, same capacity:
+  `configs/nphi51_tk0_full_h_0p3m_counted1024_2000.json`.
+- Original execution rollback (complete Hamiltonian preserved):
+  `configs/nphi51_tk0_full_h_0p3m_rollback_2000.json`.
 - Historical two-layer 0.2M baseline:
   `configs/nphi51_tk0_params_0p2m_2000.json` (`296 x 296`, 200376 params).
 - Three-layer controlled comparison:
@@ -36,6 +47,11 @@ README before using it for production runs.
 
 The three-layer config changes only the user-visible hidden layers. Sampling,
 optimizer, MPS bond dimension, batches, and execution kernels remain fixed.
+The canonical Nphi=51 config explicitly enables both execution optimizations.
+Omitted options still default off for historical/other-architecture configs.
+Short RTX4090D fixed-input and training timing checks are documented in README;
+they are not new 2000-step convergence runs. No running job is modified.
+Grouped loops and experimental cache policies are excluded from this baseline.
 
 ## Launch invariant
 

@@ -120,6 +120,10 @@ def environment(settings):
         flags["NQS_GROUPED_HASH_ROWS"] = "1"
     if e.get("scan_unroll", 1) > 1:
         flags["NQS_FORWARD_SCAN_UNROLL"] = str(e["scan_unroll"])
+    if e.get("neighbor_forward_tile") is not None:
+        flags["NQS_NEIGHBOR_FORWARD_TILE"] = str(e["neighbor_forward_tile"])
+    if e.get("neighbor_skip_unused", False):
+        flags["NQS_NEIGHBOR_SKIP_UNUSED"] = "1"
     if e.get("sampler_scan", 0) == 1:
         flags["NQS_CONSERVED_PAIR_SCAN"] = "1"
     return flags

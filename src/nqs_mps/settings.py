@@ -74,6 +74,8 @@ class Execution:
     sampler_scan: int = 0
     chain_batch: int = 4096
     forward_batch: int = 32768
+    neighbor_forward_tile: int | None = None
+    neighbor_skip_unused: bool = False
     row_width: int = 608
     cpu_threads: int = 18
     max_basis_states: int = 50_000_000
@@ -115,7 +117,7 @@ def validate(settings):
                                  "kfac_diagnostic_samples", "kfac_trace_probes"),
                     "execution": tuple(k for k in e if k not in {
                         "backend", "neighbor_execution", "first_layer_execution",
-                        "row_workspace", "sampler_scan",
+                        "row_workspace", "sampler_scan", "neighbor_forward_tile", "neighbor_skip_unused",
                     })}
     for section, names in integer_keys.items():
         for key in names:
@@ -241,6 +243,21 @@ def validate(settings):
         raise ValueError("row_workspace must be full, fixed or grouped_hash")
     if e["layernorm_block_rows"] not in {1, 2, 4, 8, 16, 32}:
         raise ValueError("layernorm_block_rows must be 1, 2, 4, 8, 16 or 32")
+    tile = e["neighbor_forward_tile"]
+    if type(e["neighbor_skip_unused"]) is not bool:
+        raise ValueError("neighbor_skip_unused must be a boolean")
+    if e["neighbor_skip_unused"] and (
+        n["generation"] != "backflow" or e["neighbor_execution"] != "compact_gpu_dedup"
+        or tile is None
+    ):
+        raise ValueError("neighbor_skip_unused requires backflow, compact_gpu_dedup and an explicit neighbor_forward_tile")
+    if tile is not None:
+        if type(tile) is not int or tile <= 0 or tile > e["forward_batch"] or e["forward_batch"] % tile:
+            raise ValueError("neighbor_forward_tile must be null or a positive integer divisor of forward_batch")
+        if n["generation"] != "backflow" or e["neighbor_execution"] not in {
+            "compact_gpu_dedup", "compact_gpu_dedup55", "compact_gpu_dedup56"
+        }:
+            raise ValueError("neighbor_forward_tile currently requires backflow with compact GPU dedup")
     if type(e["sampler_scan"]) is not int or e["sampler_scan"] not in {0, 1}:
         raise ValueError("sampler_scan must be 0 or 1")
     if e["backend"] == "m4" and (

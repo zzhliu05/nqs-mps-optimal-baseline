@@ -71,6 +71,8 @@ def _gpu_sort_deduplicate_bitstrings(
 
 def _check_compact_dedup_capacity(group_count, capacity: int):
     count = int(np.asarray(group_count))
+    if count < 0:
+        raise ValueError("GPU unique neighbor count must be nonnegative")
     if count > capacity:
         raise ValueError(
             "GPU unique neighbor count exceeds fixed capacity: "
@@ -104,9 +106,37 @@ def _kfac_gpu_solve_full(a_factor, g_factor, aug_grad, damping):
 
 
 @partial(jax.jit, static_argnames=("cfg",))
-def _cached_neighbor_wavefunction_matrix(params, states, cfg: NetworkConfig):
+def _cached_neighbor_wavefunction_matrix(params, states, cfg: NetworkConfig, valid_count=None):
     if _os.environ.get("NQS_NEIGHBOR_FIRST_LAYER_REUSE") == "1":
         cfg = replace(cfg, mps_first_layer_backend="reuse")
+    tile_text = _os.environ.get("NQS_NEIGHBOR_FORWARD_TILE")
+    if tile_text is not None:
+        tile = int(tile_text)
+        if tile <= 0 or not cfg.forward_batch_size or cfg.forward_batch_size % tile:
+            raise ValueError("neighbor forward tile must divide the logical forward batch")
+        # Change only neighbor execution, after full padded rows/dedup are built.
+        cfg = replace(cfg, forward_batch_size=tile)
+    if valid_count is not None:
+        capacity, sites = states.shape
+        tile = cfg.forward_batch_size
+        if not tile or capacity % tile:
+            raise ValueError("counted neighbor forward requires a tile dividing buffer capacity")
+        count = jnp.asarray(valid_count)
+        if count.ndim or not jnp.issubdtype(count.dtype, jnp.integer):
+            raise ValueError("valid_count must be an integer scalar")
+        jax.debug.callback(partial(_check_compact_dedup_capacity, capacity=capacity),
+                           count, ordered=True)
+        blocks = (jnp.clip(count, 0, capacity) + tile - 1) // tile
+        output = jnp.zeros((capacity, cfg.k), dtype=jnp.complex64)
+
+        def body(i, out):
+            zero = jnp.asarray(0, dtype=i.dtype)
+            chunk = jax.lax.dynamic_slice(states, (i * tile, zero), (tile, sites))
+            values = wavefunction_matrix(params, chunk, cfg)
+            return jax.lax.dynamic_update_slice(out, values, (i * tile, zero))
+
+        # Fixed buffers/inverse map are retained; the GPU count skips only unused blocks.
+        return jax.lax.fori_loop(0, blocks, body, output)
     return batched_wavefunction_matrix(params, states, cfg)
 
 
@@ -2579,6 +2609,7 @@ def _accumulate_offdiagonal_from_bitstrings(
         from .triton_kernels import compact_row_reduce_pallas
 
         entry_inverse = None
+        group_count = None
         if _os.environ.get("NQS_COMPACT_GPU_DEDUP") == "1":
             dedup_capacity = int(_os.environ["NQS_COMPACT_DEDUP_SIZE"])
             bits_jax, entry_inverse, group_count = _gpu_sort_deduplicate_bitstrings(
@@ -2635,9 +2666,16 @@ def _accumulate_offdiagonal_from_bitstrings(
                 ((bits_jax[:, None] >> shifts[None, :]) & jnp.uint64(1))
                 .astype(jnp.float32)
             )
-            phi = neighbor_wavefunction_matrix(
-                params, states, net_cfg
-            ).astype(jnp.complex128)
+            if _os.environ.get("NQS_NEIGHBOR_SKIP_UNUSED") == "1":
+                if group_count is None or _os.environ.get("NQS_CACHE_BATCHED_WAVEFUNCTION_JIT") != "1":
+                    raise ValueError("counted neighbor execution requires cached GPU dedup forward")
+                phi = neighbor_wavefunction_matrix(
+                    params, states, net_cfg, valid_count=group_count
+                ).astype(jnp.complex128)
+            else:
+                phi = neighbor_wavefunction_matrix(
+                    params, states, net_cfg
+                ).astype(jnp.complex128)
         if entry_inverse is not None:
             phi = phi[entry_inverse]
         reduced = compact_row_reduce_pallas(
