@@ -1,0 +1,7 @@
+{
+  "system": {"nphi":51,"p":1,"q":3,"tk":17,"landau_level":0,"ratio_rect":1.0,"coulomb_cut":null},
+  "network": {"generation":"backflow","hidden_sizes":[397,397],"bond_dim":10,"embed_dim":128,"init_std":0.01,"conv_kernel_size":3},
+  "sampling": {"proposal":"conserved_pair","chains":16384,"estimator_chains":null,"burn":40,"between":1},
+  "training": {"steps":3000,"seed":512039,"optimizer":"kfac","learning_rate":0.005,"learning_rate_schedule":"constant","damping":0.001,"max_step_norm":20,"project_wavefunction_norm_gauge":false,"project_wavefunction_norm_gauge_fisher":false,"gradient_clip_norm":null},
+  "execution": {"backend":"m4","neighbor_execution":"compact_gpu_dedup","dedup_chunks":150,"first_layer_execution":"reuse_fused_tail","row_workspace":"full","layernorm_block_rows":4,"scan_unroll":1,"sampler_scan":1,"chain_batch":4096,"forward_batch":32768,"neighbor_forward_tile":1024,"neighbor_skip_unused":true,"row_width":1856,"cpu_threads":18,"max_basis_states":50000000}
+}

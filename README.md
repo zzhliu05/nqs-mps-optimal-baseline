@@ -1,5 +1,36 @@
 # NQS MPS Optimal Baseline
 
+## Importance-Sampling Templates (2026-11-21)
+
+New standalone entry points are included without changing the full-neighbor
+baseline below. These use complete Hamiltonian rows BEFORE unbiased neighbor
+subsampling; they do not restore the historical incomplete-H bug.
+
+| Entry | Exact top terms | Tail draws | Total chains | chain_batch |
+| --- | ---: | ---: | ---: | ---: |
+| [importance_baseline](importance_baseline/README.md) | 32 | 32 | 16384 | 16384 default; 4096 sector launcher |
+| [importance_top64](importance_top64/README.md) | 64 | 32 | 16384 | 4096 |
+
+Both use Nphi51, nu1/3, H397x397, D10, fused18-thread CPU sampling, compact GPU
+dedup, tile1024, valid-proposal-only MCMC forward, burn40 and KFAC lr0.005,
+damping0.001, constant clip20 (NOT the historical10-to20 schedule below).
+Fisher projection, PT and state-row caching are off. Defaults are3000 steps,
+tk17, seed512039. Full-neighbor execution remains available via `--exact`;
+`--no-mask` restores all-proposal forward. See template docs for validation
+limits, resume semantics and source/estimator manifests.
+
+```bash
+cd importance_baseline
+python run_importance.py --tk 17 --steps 3000 --output results/run1
+# Or cd ../importance_top64 and use its run_importance.py for top64+32.
+```
+
+IMPORTANT: original runtime history/resolved can label the underlying evaluator
+`exact`; actual neighbor estimator is recorded in importance_manifest.json.
+Conditional unbiasedness does not mean zero extra variance or certified long
+training convergence. Top64 is an experimental comparison, not a proven win.
+No checkpoints, raw results, SSH keys or credentials are included.
+
 Production template for sector-free Backflow MPS variational Monte Carlo on
 the torus. The current Nphi=51 baseline (2026-11-19) uses the complete
 Hamiltonian row reduction and a two-layer 0.3M-parameter MLP.
