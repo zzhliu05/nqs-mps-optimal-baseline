@@ -11,6 +11,7 @@ import numpy as np
 import os as _os
 
 from .config import NetworkConfig
+from .mps_scaling import contraction_scale
 
 
 def _apply_mps_backflow_triton_first_layer(params, states, activation: str):
@@ -1857,6 +1858,7 @@ def _apply_mps(
                 ),
                 1e-30,
             )
+            norm = contraction_scale(norm)
             product = product / norm[..., None, None]
             log_scale = log_scale + jnp.log(norm)
         amplitude = jnp.trace(product, axis1=-2, axis2=-1)
@@ -2178,7 +2180,7 @@ def contract_periodic_mps(matrices, logphi_real_clip: float):
         current, current_log_scale = carry
         updated = jnp.einsum("bkij,bkjl->bkil", current, site_matrix)
         norm = jnp.sqrt(jnp.sum(jnp.abs(updated) ** 2, axis=(-2, -1)))
-        safe_norm = jnp.maximum(norm, 1e-30)
+        safe_norm = contraction_scale(jnp.maximum(norm, 1e-30))
         updated = updated / safe_norm[..., None, None]
         return (updated, current_log_scale + jnp.log(safe_norm)), None
 
@@ -2223,7 +2225,7 @@ def contract_periodic_mps_balanced(matrices, logphi_real_clip: float):
         )
         products = jnp.matmul(paired[:, :, 0], paired[:, :, 1])
         norms = jnp.sqrt(jnp.sum(jnp.abs(products) ** 2, axis=(-2, -1)))
-        safe_norms = jnp.maximum(norms, 1e-30)
+        safe_norms = contraction_scale(jnp.maximum(norms, 1e-30))
         products = products / safe_norms[..., None, None]
 
         paired_scales = log_scales[:, : 2 * pair_count].reshape(
@@ -2286,7 +2288,7 @@ def contract_periodic_mps_balanced_rsqrt(matrices, logphi_real_clip: float):
             + jnp.imag(products) * jnp.imag(products),
             axis=(-2, -1),
         )
-        inv_norms = jax.lax.rsqrt(jnp.maximum(norm_sq, 1e-60))
+        inv_norms = contraction_scale(jax.lax.rsqrt(jnp.maximum(norm_sq, 1e-60)))
         products = products * inv_norms[..., None, None]
 
         paired_scales = log_scales[:, : 2 * pair_count].reshape(
@@ -2339,6 +2341,7 @@ def contract_periodic_mps_fused4(matrices, logphi_real_clip: float):
             jnp.sqrt(jnp.sum(jnp.abs(products) ** 2, axis=(-2, -1))),
             1e-30,
         )
+        norms = contraction_scale(norms)
         segments = products / norms[..., None, None]
         log_scales = jnp.log(norms)
     else:
@@ -2379,6 +2382,7 @@ def contract_periodic_mps_fused4(matrices, logphi_real_clip: float):
             jnp.sqrt(jnp.sum(jnp.abs(products) ** 2, axis=(-2, -1))),
             1e-30,
         )
+        norms = contraction_scale(norms)
         products = products / norms[..., None, None]
         paired_scales = log_scales[:, : 2 * pair_count].reshape(
             (batch_size, pair_count, 2, channels)
@@ -2430,7 +2434,7 @@ def _apply_mps_from_bank_sequential(bank, occupancy, logphi_real_clip):
         site_matrix = jnp.take(site_bank, occ, axis=0)
         updated = jnp.einsum("bkij,bkjl->bkil", current, site_matrix)
         norm = jnp.sqrt(jnp.sum(jnp.abs(updated) ** 2, axis=(-2, -1)))
-        safe_norm = jnp.maximum(norm, 1e-30)
+        safe_norm = contraction_scale(jnp.maximum(norm, 1e-30))
         updated = updated / safe_norm[..., None, None]
         return (updated, current_log_scale + jnp.log(safe_norm)), None
 
@@ -2462,6 +2466,7 @@ def _apply_mps_from_bank_balanced(bank, occupancy, logphi_real_clip):
     norms = jnp.maximum(
         jnp.sqrt(jnp.sum(jnp.abs(products) ** 2, axis=(-2, -1))), 1e-30
     )
+    norms = contraction_scale(norms)
     segments = products / norms[..., None, None]
     log_scales = jnp.log(norms)
     if num_sites % 2:
@@ -2470,6 +2475,7 @@ def _apply_mps_from_bank_balanced(bank, occupancy, logphi_real_clip):
         last_norm = jnp.maximum(
             jnp.sqrt(jnp.sum(jnp.abs(last) ** 2, axis=(-2, -1))), 1e-30
         )
+        last_norm = contraction_scale(last_norm)
         segments = jnp.concatenate((segments, (last / last_norm[..., None, None])[:, None]), axis=1)
         log_scales = jnp.concatenate((log_scales, jnp.log(last_norm)[:, None]), axis=1)
     while segments.shape[1] > 1:
@@ -2482,6 +2488,7 @@ def _apply_mps_from_bank_balanced(bank, occupancy, logphi_real_clip):
         pn = jnp.maximum(
             jnp.sqrt(jnp.sum(jnp.abs(prod) ** 2, axis=(-2, -1))), 1e-30
         )
+        pn = contraction_scale(pn)
         prod = prod / pn[..., None, None]
         paired_scales = log_scales[:, : 2 * pair_count].reshape(
             (batch_size, pair_count, 2, channels)
@@ -2529,7 +2536,7 @@ def contract_periodic_mps_sitemajor(matrices, logphi_real_clip: float):
         site_matrix = matrices[site_index]
         updated = jnp.einsum("bcij,bcjk->bcik", product, site_matrix)
         norm = jnp.sqrt(jnp.sum(jnp.abs(updated) ** 2, axis=(-2, -1)))
-        safe = jnp.maximum(norm, 1e-30)
+        safe = contraction_scale(jnp.maximum(norm, 1e-30))
         product = updated / safe[..., None, None]
         log_scale = log_scale + jnp.log(safe)
     amplitude = jnp.trace(product, axis1=-2, axis2=-1)

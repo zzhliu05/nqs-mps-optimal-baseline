@@ -83,6 +83,11 @@ def pack_sparse_bitstring_rows(
 ):
     """Pack valid fixed-width row entries while preserving row-major order."""
 
+    if NUMBA_AVAILABLE:
+        from .cpu_full_rows import ChunkPackedRows, pack_rows
+        if isinstance(rows,ChunkPackedRows):
+            return pack_rows(rows,capacity,value_dtype)
+
     neighbors = np.asarray(rows.neighbor_bitstrings, dtype=np.uint64)
     vals = np.asarray(rows.vals, dtype=np.complex128)
     mask = np.asarray(rows.mask)
@@ -1321,6 +1326,9 @@ class TorusCoulombHamiltonian:
                 np.zeros(empty_shape, dtype=np.float64),
             )
 
+        if NUMBA_AVAILABLE and pad_to_nnz is not None and os.environ.get("NQS_CPU_ROW_BUILDER") == "masked_full":
+            from .cpu_full_rows import build_rows
+            return build_rows(self,row_bitstrings,pad_to_nnz)
         coulomb_mat = self._require_coulomb_matrix()
         if NUMBA_AVAILABLE:
             # Hoist antisymmetrization out of the per-row scattering loop.
@@ -1335,8 +1343,15 @@ class TorusCoulombHamiltonian:
                 + coulomb_mat[j2, j1, j4, j3]
             ).astype(np.complex128)
             if pad_to_nnz is not None:
+                mode = os.environ.get("NQS_CPU_ROW_BUILDER", "linear")
+                if mode == "hash":
+                    from .cpu_row_hash import build as fixed_builder
+                elif mode == "linear":
+                    fixed_builder = _build_sparse_bitstring_rows_numba_fixed
+                else:
+                    raise ValueError("NQS_CPU_ROW_BUILDER must be hash or linear")
                 diag, neighbors, vals, counts, overflow = (
-                    _build_sparse_bitstring_rows_numba_fixed(
+                    fixed_builder(
                         flat,
                         j1,
                         j2,

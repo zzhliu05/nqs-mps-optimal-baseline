@@ -106,7 +106,7 @@ def _kfac_gpu_solve_full(a_factor, g_factor, aug_grad, damping):
 
 
 @partial(jax.jit, static_argnames=("cfg",))
-def _cached_neighbor_wavefunction_matrix(params, states, cfg: NetworkConfig, valid_count=None):
+def _standard_cached_neighbor_wavefunction_matrix(params, states, cfg: NetworkConfig, valid_count=None):
     if _os.environ.get("NQS_NEIGHBOR_FIRST_LAYER_REUSE") == "1":
         cfg = replace(cfg, mps_first_layer_backend="reuse")
     tile_text = _os.environ.get("NQS_NEIGHBOR_FORWARD_TILE")
@@ -138,6 +138,32 @@ def _cached_neighbor_wavefunction_matrix(params, states, cfg: NetworkConfig, val
         # Fixed buffers/inverse map are retained; the GPU count skips only unused blocks.
         return jax.lax.fori_loop(0, blocks, body, output)
     return batched_wavefunction_matrix(params, states, cfg)
+
+
+_prepacked_evaluator = None
+
+
+def _cached_neighbor_wavefunction_matrix(params, states, cfg: NetworkConfig, valid_count=None):
+    if _os.environ.get("NQS_NEIGHBOR_PREPACKED") == "1":
+        global _prepacked_evaluator
+        if _prepacked_evaluator is None:
+            from .prepacked_neighbor import make_candidate
+            _prepacked_evaluator = make_candidate(tuned=_os.environ.get("NQS_NEIGHBOR_PREPACKED_TUNED") == "1")
+        return _prepacked_evaluator(params, states, cfg, valid_count=valid_count)
+    return _standard_cached_neighbor_wavefunction_matrix(params, states, cfg, valid_count=valid_count)
+
+
+def _clear_neighbor_forward_cache():
+    global _prepacked_evaluator
+    _standard_cached_neighbor_wavefunction_matrix.clear_cache()
+    if _prepacked_evaluator is not None:
+        _prepacked_evaluator.packed_loop.clear_cache()
+        from .prepacked_neighbor import pack
+        pack.clear_cache()
+        _prepacked_evaluator = None
+
+
+_cached_neighbor_wavefunction_matrix.clear_cache = _clear_neighbor_forward_cache
 
 
 @partial(jax.jit, static_argnames=("cfg", "row_count"))

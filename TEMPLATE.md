@@ -31,6 +31,13 @@ README before using it for production runs.
 
 ## Canonical configs
 
+- Full-neighbor 16384-chain CPU optimization:
+  `configs/nphi51_fullneighbor_16384_cpu.json` (`masked_full`, clip20).
+- The same configuration with local-energy chain batches on two GPUs:
+  `configs/nphi51_fullneighbor_16384_cpu_2gpu.json`.
+  Total chains remain 16384; each GPU evaluates two 4096-chain batches.
+  Gradient, KFAC and sampling remain global on the primary GPU.
+  Only `execution.local_energy_devices` changes between these two presets.
 - Current complete-H two-layer 0.3M baseline:
   `configs/nphi51_tk0_full_h_0p3m_2000.json` (`397 x 397`, 304103 params).
 - Streaming-only comparison, unchanged physical settings:

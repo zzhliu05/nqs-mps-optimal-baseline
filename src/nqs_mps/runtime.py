@@ -6,11 +6,16 @@ import os
 def environment(settings):
     e = settings["execution"]
     flags = {
+        "NQS_NEIGHBOR_PREPACKED": "1" if e.get("neighbor_prepacked", False) else "0",
+        "NQS_NEIGHBOR_PREPACKED_TUNED": "1" if e.get("neighbor_prepacked_tuned", False) else "0",
+        "NQS_MPS_SCALE_STOP_GRADIENT": "1" if e.get("mps_scale_stop_gradient", True) else "0",
         "JAX_ENABLE_X64": "true", "XLA_PYTHON_CLIENT_PREALLOCATE": "false",
         "NQS_MATERIALIZE_SECTOR": (
             "0" if settings["sampling"]["proposal"] == "conserved_pair" else "1"
         ),
         "NQS_CONTIGUOUS_ROW_REDUCE": "1", "NQS_DISABLE_ROW_CACHE": "1",
+        "NQS_CPU_ROW_BUILDER": e.get("cpu_row_builder", "hash"),
+        "NQS_LOCAL_ENERGY_DEVICES": str(e.get("local_energy_devices", 1)),
         "NQS_CACHE_BATCHED_WAVEFUNCTION_JIT": "1",
     }
     if e.get("neighbor_execution", "dense") != "dedup_hash":

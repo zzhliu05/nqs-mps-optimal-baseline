@@ -212,7 +212,7 @@ def _site_bank_chunk_loss_and_grad(
     return jax.value_and_grad(loss_fn)(bank)
 
 
-def _vmc_chain_batched_loss_and_grad(
+def _local_energy_chain_batches(
     params,
     states,
     positions_np,
@@ -468,6 +468,91 @@ def _vmc_chain_batched_loss_and_grad(
         wf_abs_max = max(wf_abs_max, float(wf_stats["wf_abs_max"]))
         wf_abs_min = min(wf_abs_min, float(wf_stats["wf_abs_min"]))
         wf_count += chunk_count
+
+    return {
+        "eloc_parts": eloc_parts,
+        "wf_l2_sq": wf_l2_sq,
+        "wf_abs_sum": wf_abs_sum,
+        "wf_logabs_sum": wf_logabs_sum,
+        "wf_logabs_sq_sum": wf_logabs_sq_sum,
+        "wf_abs_max": wf_abs_max,
+        "wf_abs_min": wf_abs_min,
+        "wf_count": wf_count,
+        "sparse_row_build_time": sparse_row_build_time,
+        "sparse_row_transfer_time": sparse_row_transfer_time,
+        "sparse_row_slice_time": sparse_row_slice_time,
+        "local_energy_eval_time": local_energy_eval_time,
+        "sampled_state_stage_time": sampled_state_stage_time,
+        "gradient_eval_time": gradient_eval_time,
+        "metric_stage_time": metric_stage_time,
+        "strict_site_bank": strict_site_bank,
+        "use_site_bank": use_site_bank,
+        "site_bank": site_bank,
+    }
+
+
+def _vmc_chain_batched_loss_and_grad(
+    params,
+    states,
+    positions_np,
+    sparse_rows,
+    chain_batch_size: int,
+    neighbor_padding_size: int | None,
+    neighbor_padding_bucket_size: int | None,
+    fixed_sparse_row_nnz: int | None,
+    config: RunConfig,
+    tk: int,
+    hamiltonian: TorusCoulombHamiltonian | None,
+    basis: BasisData | None,
+    stream_sampled_rows: bool,
+    sector_bitstrings_np=None,
+    sparse_rows_from_bitstrings: bool = False,
+    neighbor_sampling_seed: int = 0,
+    shared_site_bank=None,
+    site_bank_pullback=None,
+):
+    """Evaluate local energies across devices; retain one global VMC update."""
+    from .chain_devices import evaluate_chain_batches
+
+    total_samples = int(positions_np.shape[0])
+    result = evaluate_chain_batches(_local_energy_chain_batches, {
+        "params": params,
+        "states": states,
+        "positions_np": positions_np,
+        "sparse_rows": sparse_rows,
+        "chain_batch_size": chain_batch_size,
+        "neighbor_padding_size": neighbor_padding_size,
+        "neighbor_padding_bucket_size": neighbor_padding_bucket_size,
+        "fixed_sparse_row_nnz": fixed_sparse_row_nnz,
+        "config": config,
+        "tk": tk,
+        "hamiltonian": hamiltonian,
+        "basis": basis,
+        "stream_sampled_rows": stream_sampled_rows,
+        "sector_bitstrings_np": sector_bitstrings_np,
+        "sparse_rows_from_bitstrings": sparse_rows_from_bitstrings,
+        "neighbor_sampling_seed": neighbor_sampling_seed,
+        "shared_site_bank": shared_site_bank,
+        "site_bank_pullback": site_bank_pullback,
+    })
+    eloc_parts = result["eloc_parts"]
+    wf_l2_sq = result["wf_l2_sq"]
+    wf_abs_sum = result["wf_abs_sum"]
+    wf_logabs_sum = result["wf_logabs_sum"]
+    wf_logabs_sq_sum = result["wf_logabs_sq_sum"]
+    wf_abs_max = result["wf_abs_max"]
+    wf_abs_min = result["wf_abs_min"]
+    wf_count = result["wf_count"]
+    sparse_row_build_time = result["sparse_row_build_time"]
+    sparse_row_transfer_time = result["sparse_row_transfer_time"]
+    sparse_row_slice_time = result["sparse_row_slice_time"]
+    local_energy_eval_time = result["local_energy_eval_time"]
+    sampled_state_stage_time = result["sampled_state_stage_time"]
+    gradient_eval_time = result["gradient_eval_time"]
+    metric_stage_time = result["metric_stage_time"]
+    strict_site_bank = result["strict_site_bank"]
+    use_site_bank = result["use_site_bank"]
+    site_bank = result["site_bank"]
 
     eloc_np = np.concatenate(eloc_parts)
     energy = float(np.real(np.mean(eloc_np)))

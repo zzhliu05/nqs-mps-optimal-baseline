@@ -6,6 +6,67 @@ Hamiltonian row reduction and a two-layer 0.3M-parameter MLP.
 
 ## Current Nphi=51 baseline
 
+CPU update (2026-11-21): fixed-width packed-bitstring rows default to
+`execution.cpu_row_builder="hash"`. This preserves term order, neighbor order,
+and coefficients while replacing linear neighbor lookup with a row-local hash.
+Rollback: set `execution.cpu_row_builder="linear"` in the input JSON. The
+canonical launcher records the mode in resolved settings and environment.json;
+shell NQS overrides are cleared by that launcher. This does not change network,
+sampling, clipping, row width, or GPU deduplication settings.
+
+Measured with Top64+32, 32768 chains, chain_batch4096 and18 CPU threads:
+CPU rows plus packing about1.19s ->0.62s, total step about4.2s ->3.6s.
+Two ABBA tests excluded compilation; real-chain row checks and same-process
+fixed-input energy/gradient replay were exact. These timings do not claim
+the same speedup for full-neighbor or other-size workloads, or bitwise
+reproducibility across independent training processes.
+
+The further optimized deterministic Top256 path (fused row construction and
+selection, precomputed parity masks, fixed Hamiltonian coefficient reuse) is
+available in the sibling `NQS_MPS_importance_baseline_20261121` template via
+`run_importance.py --config config_top256_cpu.json --top256 --output ...`.
+It is deliberately not substituted for this template's full-neighbor estimator:
+deterministic truncation changes the estimator and must be selected explicitly.
+
+### Nphi51 Full Neighbors, 16384 Chains
+
+`configs/nphi51_fullneighbor_16384_cpu.json` selects the optimized full-H CPU
+builder, `execution.cpu_row_builder="masked_full"`. It retains every neighbor:
+there is no Top-K selection, random tail, or changed estimator. The preset uses
+tk3, H397x397, D10, 16384 chains, chain_batch4096, forward_batch32768,
+neighbor tile1024, burn40, KFAC lr0.005/clip20, 3000 steps and one GPU.
+
+```bash
+PYTHONPATH=src python -m nqs_mps --config configs/nphi51_fullneighbor_16384_cpu.json --output results/full51_cpu
+```
+
+Implementation: row-local hash, precomputed fermion-parity masks, fixed-H
+coefficient reuse, CPU-chunk row-major packing, and counts-based compact output.
+The full-batch mask and its count scan are avoided. Unused scratch slots are
+never copied or sent to GPU. No wavefunction value or sampled row is cached.
+The existing coefficient dtype, row width1856 and overflow checks are retained.
+The GPU unique capacity is232*32768, enough for the maximum fixed row slots;
+compact staging also retains its independent capacity check and fails on
+overflow instead of dropping neighbors. This reserve is not a sector table.
+
+Cached Hamiltonian arrays become read-only. Replacing the matrix or term array
+invalidates the cache; forcibly re-enabling writable access fails closed.
+Choose cpu_row_builder=hash to disable the mask cache and chunk packing, or
+linear for the original row search. Other existing presets remain unchanged.
+masked_full requires conserved_pair and compact_gpu_dedup, because it returns
+an internal packed row object instead of a dense neighbor/mask tensor.
+
+CPU tests: `PYTHONPATH=src python -m unittest discover -s tests -p "test_cpu_full_rows.py"`.
+Tests include more than1024 valid neighbors per row, chunk boundaries, exact
+neighbor order/coefficients, both coefficient dtypes, overflow and cache rebuild.
+Integration job170764 completed normally on one4090D: same-process full-H
+replay had energy_delta=0 and gradient_max_abs=0 for both warm repetitions.
+CPU row/packing time was0.252/0.251s (hash) versus0.118/0.119s (masked_full).
+A fresh3-step training smoke also completed and saved params.pkl; step3 was
+11.722s. These are short validation timings, not a long-convergence guarantee
+or a two-GPU performance comparison. Existing generic presets still default
+to hash; this explicit16384-chain preset defaults to masked_full.
+
 Use `configs/nphi51_tk0_full_h_0p3m_2000.json` for new runs:
 
 | Setting | Value |
@@ -161,6 +222,55 @@ The canonical opt-in example is
 long run.
 
 ## Run
+
+### Full-neighbor chain-batch device parallelism
+
+`configs/nphi51_fullneighbor_16384_cpu_2gpu.json` enables
+`execution.local_energy_devices=2`. The default remains 1. Both presets use
+16384 total chains, not 16384 per GPU. With `chain_batch=4096`, GPU0 evaluates
+batches 0 and 2, while GPU1 evaluates batches 1 and 3. Full Hamiltonian rows
+are retained; this is not Top-K truncation or neighbor importance sampling.
+
+Only row construction and local-energy evaluation run concurrently. Parameters
+are replicated for each evaluation, local energies return to host in their
+original chain order, and the global mean, VMC gradient, KFAC and optimizer
+update remain on the primary device. Sampling also remains on that device.
+This is not distributed KFAC or a data-parallel optimizer.
+
+The immutable CPU coefficient cache is prepared before worker launch. An
+18-thread CPU budget is split into 9 Numba threads per worker. Two visible
+GPUs and an estimator sample count divisible by `2 * chain_batch` are required.
+This opt-in path currently supports exact streamed bitstring backflow, not
+site tensor banks. Set `local_energy_devices=1` to roll back without changing
+the network, chain count or CPU row builder.
+
+`CHAIN_DEVICE_TIMING` log records contain the elapsed parallel local-energy
+stage. The existing CPU-row and local-energy component fields are **summed
+worker time**, not elapsed stage time; do not add them to infer dual-GPU
+training wall time. Use `time_step` for actual full-step comparisons.
+
+From the template root, after activating the JAX environment:
+
+```bash
+mkdir -p logs
+export NQS_PYTHON="$(command -v python)"
+sbatch scripts/submit_nphi51_fullneighbor_2gpu.sbatch
+```
+
+For a short allocated two-GPU test, use `python -m nqs_mps --config
+configs/nphi51_fullneighbor_16384_cpu_2gpu.json --steps 8 --output outputs/test2gpu`
+(as one command).
+
+RTX4090D job `170765` completed successfully. Two interleaved fixed-input
+repeats had identical energies, gradients and KFAC inputs: mean `loss_grad`
+was 10.9405 s on one GPU versus 5.6521 s on two (1.936x). Separate 8-step
+training smoke tests, excluding step 1, averaged 11.7776 versus 6.4724 s per
+complete step (1.820x); medians were 11.8057 and 6.4663 s. Both saved final
+checkpoints. Peak observed memory over the entire validation job was
+16854/9617 MiB on GPU0/GPU1. Independent training trajectories differed after
+initialization, so these short tests do not establish long-run convergence
+equivalence. The fixed-input comparison, not equal seeds alone, is the
+numerical-equivalence check.
 
 Use Python 3.10+ with a CUDA-compatible JAX installation. Launch from the
 repository root so legacy packages in a parent directory cannot shadow this

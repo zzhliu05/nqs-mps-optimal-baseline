@@ -34,6 +34,10 @@ class Sampling:
     estimator_chains: int | None = None
     burn: int = 40
     between: int = 1
+    parallel_tempering: bool = False
+    tempering_replicas: int = 8
+    tempering_beta_min: float = 0.25
+    tempering_swap_interval: int = 1
 
 
 @dataclass
@@ -69,13 +73,18 @@ class Execution:
     dedup_chunks: int = 58
     first_layer_execution: str = "dense"
     row_workspace: str = "full"
+    cpu_row_builder: str = "hash"
+    local_energy_devices: int = 1
     layernorm_block_rows: int = 4
     scan_unroll: int = 1
     sampler_scan: int = 0
+    mps_scale_stop_gradient: bool = True
     chain_batch: int = 4096
     forward_batch: int = 32768
     neighbor_forward_tile: int | None = None
     neighbor_skip_unused: bool = False
+    neighbor_prepacked: bool = False
+    neighbor_prepacked_tuned: bool = False
     row_width: int = 608
     cpu_threads: int = 18
     max_basis_states: int = 50_000_000
@@ -106,6 +115,8 @@ def load_settings(path):
 
 
 def validate(settings):
+    if type(settings["execution"]["mps_scale_stop_gradient"]) is not bool:
+        raise ValueError("mps_scale_stop_gradient must be a boolean")
     s, n, p, t, e = (settings[k] for k in SECTIONS)
     integer_keys = {"system": ("nphi", "p", "q", "tk", "landau_level"),
                     "network": ("bond_dim", "embed_dim", "conv_kernel_size"),
@@ -116,8 +127,8 @@ def validate(settings):
                                  "max_step_norm_ramp_end",
                                  "kfac_diagnostic_samples", "kfac_trace_probes"),
                     "execution": tuple(k for k in e if k not in {
-                        "backend", "neighbor_execution", "first_layer_execution",
-                        "row_workspace", "sampler_scan", "neighbor_forward_tile", "neighbor_skip_unused",
+                        "backend", "neighbor_execution", "first_layer_execution", "cpu_row_builder",
+                        "row_workspace", "sampler_scan", "neighbor_forward_tile", "neighbor_skip_unused", "mps_scale_stop_gradient", "neighbor_prepacked", "neighbor_prepacked_tuned",
                     })}
     for section, names in integer_keys.items():
         for key in names:
@@ -202,6 +213,15 @@ def validate(settings):
         raise ValueError("Direct MPS has no MLP KFAC factors; select adam")
     if p["chains"] <= 0 or p["burn"] < 0 or p["between"] < 0:
         raise ValueError("Invalid sampler counts")
+    if type(p["parallel_tempering"]) is not bool:
+        raise ValueError("parallel_tempering must be boolean")
+    if type(p["tempering_replicas"]) is not int or p["tempering_replicas"] < 2:
+        raise ValueError("tempering_replicas must be an integer >= 2")
+    beta = p["tempering_beta_min"]
+    if isinstance(beta, bool) or not isinstance(beta, (int, float)) or not 0 < beta < 1:
+        raise ValueError("tempering_beta_min must lie in (0, 1)")
+    if type(p["tempering_swap_interval"]) is not int or p["tempering_swap_interval"] <= 0:
+        raise ValueError("tempering_swap_interval must be a positive integer")
     if p["proposal"] not in {"conserved_pair", "sector_uniform"}:
         raise ValueError("sampling.proposal must be conserved_pair or sector_uniform")
     estimator = p["estimator_chains"] if p["estimator_chains"] is not None else p["chains"]
@@ -241,11 +261,41 @@ def validate(settings):
         raise ValueError("reuse first layer requires plain backflow")
     if e["row_workspace"] not in {"full", "fixed", "grouped_hash"}:
         raise ValueError("row_workspace must be full, fixed or grouped_hash")
+    if e["cpu_row_builder"] not in {"hash", "linear", "masked_full"}:
+        raise ValueError("cpu_row_builder must be hash, linear or masked_full")
+    devices = e["local_energy_devices"]
+    if type(devices) is not int or devices not in (1, 2):
+        raise ValueError("local_energy_devices must be 1 or 2")
+    if devices > 1:
+        if estimator % (devices * e["chain_batch"]):
+            raise ValueError("estimator_chains must divide evenly into device chain batches")
+        if settings["sampling"]["proposal"] != "conserved_pair" or n["generation"] != "backflow":
+            raise ValueError("multi-device local energy requires conserved_pair and backflow")
+        if e["cpu_threads"] < devices:
+            raise ValueError("cpu_threads must cover every local-energy device")
+    if e["cpu_row_builder"] == "masked_full":
+        if e["neighbor_execution"] != "compact_gpu_dedup" or settings["sampling"]["proposal"] != "conserved_pair":
+            raise ValueError("masked_full requires compact_gpu_dedup and conserved_pair")
     if e["layernorm_block_rows"] not in {1, 2, 4, 8, 16, 32}:
         raise ValueError("layernorm_block_rows must be 1, 2, 4, 8, 16 or 32")
     tile = e["neighbor_forward_tile"]
     if type(e["neighbor_skip_unused"]) is not bool:
         raise ValueError("neighbor_skip_unused must be a boolean")
+    if type(e["neighbor_prepacked"]) is not bool:
+        raise ValueError("neighbor_prepacked must be a boolean")
+    if type(e["neighbor_prepacked_tuned"]) is not bool:
+        raise ValueError("neighbor_prepacked_tuned must be a boolean")
+    if e["neighbor_prepacked_tuned"] and not e["neighbor_prepacked"]:
+        raise ValueError("neighbor_prepacked_tuned requires neighbor_prepacked")
+    if e["neighbor_prepacked"] and not (
+        settings["system"]["nphi"] == 51
+        and n["generation"] == "backflow" and n["hidden_sizes"] == [397, 397]
+        and n["bond_dim"] == 10 and n["embed_dim"] == 128
+        and e["backend"] == "m4" and e["first_layer_execution"] == "reuse_fused_tail"
+        and e["neighbor_execution"] == "compact_gpu_dedup"
+        and e["neighbor_skip_unused"] and e["neighbor_forward_tile"] == 1024
+    ):
+        raise ValueError("neighbor_prepacked requires the validated N51 H397x397 D10 counted M4 baseline")
     if e["neighbor_skip_unused"] and (
         n["generation"] != "backflow" or e["neighbor_execution"] != "compact_gpu_dedup"
         or tile is None
@@ -290,7 +340,11 @@ def core_config(settings, output):
             mps_tensor_generation=n["generation"], mps_contraction="balanced",
             mps_bond_dim=n["bond_dim"], mps_backflow_embed_dim=n["embed_dim"]),
         sampler=SamplerConfig(proposal_mode=p["proposal"], n_chains=p["chains"],
-            n_burn=p["burn"], n_between=p["between"], n_samples=1, prob_n_samples=0),
+            n_burn=p["burn"], n_between=p["between"], n_samples=1, prob_n_samples=0,
+            parallel_tempering=p["parallel_tempering"],
+            tempering_replicas=p["tempering_replicas"],
+            tempering_beta_min=p["tempering_beta_min"],
+            tempering_swap_interval=p["tempering_swap_interval"]),
         optimizer=OptimizerConfig(name=optimizer_name,
             lr=t["learning_rate"],
             constant_lr=t["learning_rate_schedule"] == "constant",

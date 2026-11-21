@@ -15,6 +15,7 @@ import jax
 from jax import lax
 import jax.numpy as jnp
 from jax.experimental import pallas as pl
+from .mps_scaling import contraction_scale
 
 try:
     from jax.experimental.pallas import triton as plgpu
@@ -1278,7 +1279,7 @@ def _realblock_triplet_reference(outputs):
         + products[..., bond:, :bond] ** 2,
         axis=(-2, -1),
     )
-    norms = jnp.maximum(jnp.sqrt(norm_sq), 1e-30)
+    norms = contraction_scale(jnp.maximum(jnp.sqrt(norm_sq), 1e-30))
     return (products / norms[..., None, None]).astype(jnp.bfloat16), norms
 
 
@@ -1317,7 +1318,7 @@ def _realblock_quad_reference(outputs):
         + products[..., bond:, :bond] ** 2,
         axis=(-2, -1),
     )
-    norms = jnp.maximum(jnp.sqrt(norm_sq), 1e-30)
+    norms = contraction_scale(jnp.maximum(jnp.sqrt(norm_sq), 1e-30))
     return (products / norms[..., None, None]).astype(jnp.bfloat16), norms
 
 
@@ -1374,7 +1375,7 @@ def _finish_realblock_tree(
                 + products[..., bond:, :bond] ** 2,
                 axis=(-2, -1),
             )
-            step_norms = jnp.maximum(jnp.sqrt(norm_sq), 1e-30)
+            step_norms = contraction_scale(jnp.maximum(jnp.sqrt(norm_sq), 1e-30))
             products = products / step_norms[..., None, None]
             product_scales = product_scales + jnp.log(step_norms)
         if pairs + count % 2 > 1:
@@ -1912,7 +1913,7 @@ def persistent_realblock_oct_pallas(outputs, logphi_real_clip: float):
                 + products[..., 10:, :10] ** 2,
                 axis=(-2, -1),
             )
-            step_norms = jnp.maximum(jnp.sqrt(norm_sq), 1e-30)
+            step_norms = contraction_scale(jnp.maximum(jnp.sqrt(norm_sq), 1e-30))
             products = products / step_norms[..., None, None]
             product_scales = product_scales + jnp.log(step_norms)
         if pairs + count % 2 > 1:
